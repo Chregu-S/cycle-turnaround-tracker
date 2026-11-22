@@ -14,6 +14,34 @@ from config import SEGMENTS, THRESHOLDS
 import database as db
 import backtester
 
+SECTOR_RESEARCH_FACTORS = {
+    "shipping_drybulk": "Orderbook-to-Fleet-Ratio, aktuelle Capesize/Panamax-Spotraten & FFA-Kurve, China Eisenerz-/Kohle-Importe, P/NAV-Bewertung, Cash-Breakeven-Raten und Spot- vs. Charter-Anteil",
+    "shipping_tanker": "VLCC/Suezmax/MR-Spotraten, Orderbook-to-Fleet-Ratio, Ton-Mile-Nachfrage & Raffinerie-Auslastung, P/NAV-Bewertung, Verschuldung (LTV) und Spot-Exposure",
+    "shipping_lng": "LNG/VLGC-Spotraten, neue US-/Katar-Exportkapazitäten, Orderbook-to-Fleet-Ratio, Gas-Arbitrage-Spreads (Henry Hub vs. TTF/JKM), Charter-Backlog vs. Spot-Exposure und Refinanzierungsrisiken",
+    "ind_machinery": "Book-to-Bill-Ratio (> 1.0?), Auftragsbestand (Backlog), Abschluss des Händler-Lagerabbaus (Destocking), ISM New Orders, Operating Leverage und Bruttomargen-Trend",
+    "auto_oem": "Absatzzahlen (SAAR), Händler-Lagerbestände (Days' Supply), Rabattdruck vs. Durchschnittspreise (ATPs), EV-CapEx-Belastung vs. Verbrenner-Cashflow und Free-Cashflow-Rendite",
+    "agri_fert": "Farmer-Ökonomie (Getreide- vs. Düngerpreise), globale Dünger-Lagerbestände & Exportbeschränkungen (China/Russland), Erdgas-Kostenvorteil der Produzenten und EV/EBITDA",
+    "cons_retail": "Same-Store Sales (Comps) Trendwende, Inventar-zu-Umsatz-Verhältnis (saubere Lager -> weniger Rabatte), Bruttomargen-Expansion, Konsumenten-Kreditlage und Nettoverschuldung",
+}
+
+
+def _build_deep_research_prompt(seg_id: str, seg_name: str, score: float, tickers: list[str]) -> str:
+    factors = SECTOR_RESEARCH_FACTORS.get(
+        seg_id,
+        "Angebot/Nachfrage-Bilanz, Kapazitätsauslastung, Margen-Trend, Bewertung (EV/EBITDA, P/B) und Bilanzqualität",
+    )
+    ticker_str = ", ".join(tickers)
+    return (
+        f"Mein Makro-Zyklus-System hat heute ein BUY-Signal für das Segment '{seg_name}' "
+        f"(Zyklus-Score: {score:.1f}/100) ausgelöst. Führe eine tiefgehende Fundamental- und Zyklus-Analyse durch:\n\n"
+        f"1. REALITY-CHECK (Fehlsignal ausschließen): Dreht der fundamentale Zyklus in '{seg_name}' aktuell wirklich nach oben, "
+        f"oder handelt es sich um eine Bullenfalle? Prüfe konkret: {factors}.\n\n"
+        f"2. PURE-PLAY-SCREENING: Vergleiche diese Kandidaten ({ticker_str}) sowie ggf. 1-2 bessere Pure-Play-Alternativen der Branche. "
+        f"Bewerte sie nach: (a) Operating Leverage / Zyklus-Hebel, (b) Bewertung am Zyklusboden (P/B, EV/EBITDA, Fwd P/E), "
+        f"(c) Bilanzsicherheit (Net Debt, Liquidität) und (d) aktuellen Aussagen aus den letzten Earnings Calls.\n\n"
+        f"3. FAZIT & TOP-PICKS: Gib eine klare Ampel-Einschätzung (Kaufen / Abwarten / Fehlsignal) und nenne die 2 besten "
+        f"Aktien mit dem attraktivsten Chance-Risiko-Verhältnis inkl. konkreter Risiken (Bear Case)."
+    )
 
 def send_telegram_message(text: str) -> bool:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -189,6 +217,9 @@ def notify_signal_changes():
                 + legend
             )
             send_telegram_message(msg)
+            dr_prompt = _build_deep_research_prompt(seg_id, seg_cfg["name"], curr["s_total"], seg_cfg["stocks"])
+            dr_msg = f"🧠 <b>Gemini Deep Research Prompt (1x tippen zum Kopieren):</b>\n<pre>{html.escape(dr_prompt)}</pre>"
+            send_telegram_message(dr_msg)
 
         elif c_sig == "ORANGE":
             msg = (
