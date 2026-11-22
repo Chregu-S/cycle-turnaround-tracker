@@ -334,18 +334,24 @@ with tab_port:
     st.subheader("🏆 Portfolio-Backtest vs. S&P 500 (SPY)")
     st.caption("Nie in ROT-Sektoren · Backstop schützt gezielt das freie Parkplatz-Kapital (SPY → SHY).")
 
-    p_col1, p_col2 = st.columns([2, 1])
+    p_col1, p_col2, p_col3 = st.columns([2, 1, 1])
     with p_col1:
         max_w = st.slider(
             "Max. Gewicht pro Sektor (%) — Rest wird geparkt:",
             min_value=20, max_value=100, value=35, step=5
         ) / 100.0
     with p_col2:
-        top_n = st.selectbox("Max. Sektoren für Strategie 2 (Top-N Aktive):", [2, 3, 4], index=1)
+        top_n = st.selectbox("Max. Sektoren (Top-N Aktive):", [2, 3, 4], index=1)
+    with p_col3:
+        lag_wks = st.number_input("FRED-Lag Simulation (Wochen):", min_value=0, max_value=8, value=4, step=1)
 
     if st.button("🚀 Portfolio-Backtest vs. SPY starten", type="primary"):
-        with st.spinner("Simuliere alle 3 Strategien gegen S&P 500..."):
+        with st.spinner(f"Simuliere alle 3 Szenarien mit {lag_wks} Wochen Signal-Lag..."):
             p_res = portfolio_backtester.run_portfolio_backtest(
+                max_sector_weight=max_w,
+                top_n_active=int(top_n),
+                signal_lag_weeks=int(lag_wks),
+            )
                 max_sector_weight=max_w,
                 top_n_active=int(top_n),
             )
