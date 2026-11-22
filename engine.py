@@ -1,7 +1,12 @@
 """
-engine.py
-Berechnet rollierende 5-Jahres-Perzentile, gewichtete Kategorie-Scores
-und die Ampel-State-Machine (ROT / GELB / GRUEN / BLAU) für alle 10 Segmente.
+engine.py (Version 2.0 – Positions-State-Machine mit BUY & SELL)
+Berechnet 5-Jahres-Perzentile, Kategorie-Scores und echte Trading-Zustände:
+- BUY    (🟢): Einmaliger Einstieg nach bestätigtem Boden
+- HOLD   (🔵): Offene Long-Position läuft
+- ORANGE (🟠): Frühwarnung / Teilverkauf (Score > 70 & Nachfrage dreht ab)
+- SELL   (🔴): Hard Exit (Peak > 65 & 2 Wochen fallend, oder Notbremse < 25)
+- GELB   (🟡): Watchlist (früher Boden, noch nicht bestätigt)
+- ROT    (⚫): Neutral / Abschwung (Flat)
 """
 
 import numpy as np
@@ -12,16 +17,11 @@ import database as db
 
 
 def _rolling_percentile(series: pd.Series, window: int = ROLLING_WINDOW_WEEKS) -> pd.Series:
-    """
-    Berechnet den rollierenden Perzentil-Rang (0 bis 100) über die letzten
-    'window' Wochen. Nutzt mindestens 26 Wochen Historie als Minimum.
-    """
     def _pct_rank(arr):
         valid = arr[~np.isnan(arr)]
         if len(valid) < 2:
             return np.nan
         current = valid[-1]
-        # Anteil der Werte <= aktuellem Wert (in Prozent)
         return (np.sum(valid <= current) / len(valid)) * 100.0
 
     return series.rolling(window=window, min_periods=26).apply(_pct_rank, raw=True)
@@ -29,22 +29,18 @@ def _rolling_percentile(series: pd.Series, window: int = ROLLING_WINDOW_WEEKS) -
 
 def _evaluate_signal(df: pd.DataFrame) -> pd.Series:
     """
-    Wendet die Ampel-State-Machine zeilenweise auf einen Segment-DataFrame an.
-    Spalten benötigt: ['s_total', 's_demand']
+    Positions-State-Machine (FLAT <-> LONG):
+    Verhindert doppelte BUY-Signale und erzeugt saubere ORANGE- & SELL-Exits.
     """
     signals = []
     s_total = df["s_total"].values
     s_demand = df["s_demand"].values
 
-    # 4-Wochen-Durchschnitt der Nachfrage für Bedingung 3
     demand_ma = df["s_demand"].rolling(
         window=THRESHOLDS["demand_ma_wks"], min_periods=1
     ).mean().values
 
-    lookback = THRESHOLDS["bottom_lookback_wks"]
-    bottom_lvl = THRESHOLDS["bottom_level"]
-    green_min = THRESHOLDS["green_min"]
-    green_max = THRESHOLDS["green_max"]
+    in_position = False  # Merkt sich, ob wir aktuell LONG sind
 
     for i in range(len(df)):
         curr = s_total[i]
@@ -52,54 +48,75 @@ def _evaluate_signal(df: pd.DataFrame) -> pd.Series:
             signals.append("ROT")
             continue
 
-        # 1. BLAU: Mid-to-Late Cycle / Halten
-        if curr > green_max:
-            signals.append("BLAU")
-            continue
-
-        # Prüfen, ob genug Historie für Trendvergleich da ist
         prev1 = s_total[i - 1] if i >= 1 else np.nan
         prev2 = s_total[i - 2] if i >= 2 else np.nan
 
-        # 2. GRÜN: Bestätigter Turnaround (alle 3 Bedingungen gleichzeitig)
-        start_idx = max(0, i - lookback)
-        recent_window = s_total[start_idx : i + 1]
-        had_bottom = bool(np.nanmin(recent_window) < bottom_lvl) if len(recent_window) > 0 else False
-
-        two_weeks_up = (
-            not np.isnan(prev1)
-            and not np.isnan(prev2)
-            and (curr > prev1 > prev2)
-            and (green_min <= curr <= green_max)
-        )
-
-        demand_confirmed = (
+        demand_up = (
             not np.isnan(s_demand[i])
             and not np.isnan(demand_ma[i])
             and (s_demand[i] > demand_ma[i])
         )
+        demand_down = (
+            not np.isnan(s_demand[i])
+            and not np.isnan(demand_ma[i])
+            and (s_demand[i] < demand_ma[i])
+        )
 
-        if had_bottom and two_weeks_up and demand_confirmed:
-            signals.append("GRUEN")
-            continue
+        # ------------------------------------------------------------------
+        # FALL A: WIR SIND AKTUELL NICHT INVESTIERT (FLAT)
+        # ------------------------------------------------------------------
+        if not in_position:
+            start_idx = max(0, i - THRESHOLDS["bottom_lookback_wks"])
+            recent_window = s_total[start_idx : i + 1]
+            had_bottom = bool(np.nanmin(recent_window) < THRESHOLDS["bottom_level"])
 
-        # 3. GELB: Watchlist / Früher Boden
-        if curr < bottom_lvl and not np.isnan(prev1) and curr > prev1:
-            signals.append("GELB")
-            continue
+            two_weeks_up = (
+                not np.isnan(prev1)
+                and not np.isnan(prev2)
+                and (curr > prev1 > prev2)
+                and (THRESHOLDS["green_min"] <= curr <= THRESHOLDS["green_max"])
+            )
 
-        # 4. ROT: Abschwung / Bodenbildung
-        signals.append("ROT")
+            if had_bottom and two_weeks_up and demand_up:
+                signals.append("BUY")
+                in_position = True
+            elif curr < THRESHOLDS["bottom_level"] and not np.isnan(prev1) and curr > prev1:
+                signals.append("GELB")
+            elif curr > THRESHOLDS["green_max"]:
+                signals.append("BLAU")
+            else:
+                signals.append("ROT")
+
+        # ------------------------------------------------------------------
+        # FALL B: WIR SIND AKTUELL INVESTIERT (LONG)
+        # ------------------------------------------------------------------
+        else:
+            peak_start = max(0, i - THRESHOLDS["sell_lookback_wks"])
+            peak_window = s_total[peak_start : i + 1]
+            had_peak = bool(np.nanmax(peak_window) > THRESHOLDS["sell_peak_level"])
+
+            two_weeks_down = (
+                not np.isnan(prev1)
+                and not np.isnan(prev2)
+                and (curr < prev1 < prev2)
+            )
+
+            # 1. Hard Exit (Makro-Peak gebrochen ODER harter Rückfall < 25)
+            if (had_peak and two_weeks_down) or (curr < THRESHOLDS["hard_stop_score"] and two_weeks_down):
+                signals.append("SELL")
+                in_position = False
+            # 2. Frühwarnung / Teilverkauf (Überhitzt + Nachfrage dreht ab)
+            elif curr > THRESHOLDS["orange_min"] and demand_down:
+                signals.append("ORANGE")
+            # 3. Weiter laufen lassen
+            else:
+                signals.append("HOLD")
 
     return pd.Series(signals, index=df.index)
 
 
 def run_scoring_engine():
-    """
-    Berechnet für alle 10 Segmente und 60 Indikatoren die Perzentile,
-    Kategorie-Scores und Ampel-Signale und speichert sie in SQLite.
-    """
-    print("Starte Scoring-Engine...")
+    print("Starte Scoring-Engine (V2.0)...")
     all_indicator_rows = []
     all_segment_rows = []
 
@@ -109,21 +126,17 @@ def run_scoring_engine():
         for ind in seg_cfg["indicators"]:
             ind_id = ind["id"]
             raw_df = db.get_raw_series(ind_id)
-
             if raw_df.empty:
                 continue
 
             pct = _rolling_percentile(raw_df["raw_value"], ROLLING_WINDOW_WEEKS)
-
-            # Kontrazyklische Indikatoren invertieren (hoher Score = immer bullisch)
             if ind.get("invert", False):
                 pct = 100.0 - pct
 
             cat_series[ind["category"]].append(pct.rename(ind_id))
 
-            # Einzelindikator-Scores für die DB sammeln
             ind_df = pd.DataFrame({
-                "date": pd.to_datetime(raw_df.index).strftime("%Y-%m-%d"),
+                "date": raw_df.index.strftime("%Y-%m-%d"),
                 "indicator_id": ind_id,
                 "segment_id": seg_id,
                 "raw_value": raw_df["raw_value"].values,
@@ -132,7 +145,6 @@ def run_scoring_engine():
             }).dropna(subset=["percentile"])
             all_indicator_rows.append(ind_df)
 
-        # Kategorie-Durchschnitte bilden
         df_demand = pd.concat(cat_series["demand"], axis=1).mean(axis=1) if cat_series["demand"] else pd.Series(dtype=float)
         df_capacity = pd.concat(cat_series["capacity"], axis=1).mean(axis=1) if cat_series["capacity"] else pd.Series(dtype=float)
         df_price = pd.concat(cat_series["price"], axis=1).mean(axis=1) if cat_series["price"] else pd.Series(dtype=float)
@@ -146,21 +158,15 @@ def run_scoring_engine():
         if seg_df.empty:
             continue
 
-        # Gewichteter Gesamt-Score (dynamische Normierung, falls eine Kategorie fehlt)
-        w_d = CATEGORY_WEIGHTS["demand"]
-        w_c = CATEGORY_WEIGHTS["capacity"]
-        w_p = CATEGORY_WEIGHTS["price"]
-
         seg_df["s_total"] = (
-            seg_df["s_demand"].fillna(50.0) * w_d
-            + seg_df["s_capacity"].fillna(50.0) * w_c
-            + seg_df["s_price"].fillna(50.0) * w_p
+            seg_df["s_demand"].fillna(50.0) * CATEGORY_WEIGHTS["demand"]
+            + seg_df["s_capacity"].fillna(50.0) * CATEGORY_WEIGHTS["capacity"]
+            + seg_df["s_price"].fillna(50.0) * CATEGORY_WEIGHTS["price"]
         )
 
-        # Ampel-State-Machine anwenden
         seg_df["signal"] = _evaluate_signal(seg_df)
         seg_df["segment_id"] = seg_id
-        seg_df["date"] = pd.to_datetime(seg_df.index).strftime("%Y-%m-%d")
+        seg_df["date"] = seg_df.index.strftime("%Y-%m-%d")
 
         all_segment_rows.append(
             seg_df[["date", "segment_id", "s_demand", "s_capacity", "s_price", "s_total", "signal"]]
@@ -168,8 +174,7 @@ def run_scoring_engine():
 
     if all_indicator_rows:
         db.save_indicator_scores(pd.concat(all_indicator_rows, ignore_index=True))
-
     if all_segment_rows:
         db.save_segment_scores(pd.concat(all_segment_rows, ignore_index=True))
 
-    print("Scoring-Engine erfolgreich abgeschlossen.")
+    print("Scoring-Engine V2.0 abgeschlossen.")
