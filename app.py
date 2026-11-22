@@ -1,9 +1,10 @@
 """
-app.py (Version 2.0 – Mit Sell-Signalen & Backtest-Tab)
+app.py (Version 2.1 – Mit Quant-Lab für Signal-Diagnose)
 Streamlit-Dashboard für den Cycle Turnaround Tracker.
 """
 
 import os
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -12,6 +13,7 @@ import streamlit as st
 from config import SEGMENTS, THRESHOLDS, DB_PATH
 import database as db
 import backtester
+import analyzer
 
 st.set_page_config(page_title="Cycle Turnaround Tracker", page_icon="📈", layout="wide")
 
@@ -27,8 +29,8 @@ SIGNAL_BADGES = {
 
 SIGNAL_ORDER = {"BUY": 0, "ORANGE": 1, "SELL": 2, "GELB": 3, "HOLD": 4, "BLAU": 5, "ROT": 6}
 
-st.title("📈 Cycle Turnaround Tracker V2.0")
-st.caption("10 Sub-Segmente · 60 Indikatoren · Positions-State-Machine (BUY / ORANGE / SELL) · Live-Backtester")
+st.title("📈 Cycle Turnaround Tracker V2.1")
+st.caption("10 Sub-Segmente · 60 Indikatoren · Positions-State-Machine · Live-Backtester · Quant-Lab")
 
 if not os.path.exists(DB_PATH):
     st.warning("Datenbank `cycle_data.db` fehlt noch. Bitte zuerst den GitHub-Actions-Workflow starten.")
@@ -39,7 +41,13 @@ if last_run:
     run_at, run_status, run_msg = last_run
     st.info(f"**Letztes Update:** {run_at} | **Status:** {run_status} — {run_msg}")
 
-tab_overview, tab_backtest = st.tabs(["📊 Zyklus-Dashboard", "🧪 Backtest & Validierung"])
+tab_overview, tab_backtest, tab_quant = st.tabs([
+    "📊 Zyklus-Dashboard",
+    "🧪 Backtest & Validierung",
+    "🔬 Signal-Diagnose (Quant-Lab)",
+])
+
+seg_options = {seg_cfg["name"]: seg_id for seg_id, seg_cfg in SEGMENTS.items()}
 
 # ==============================================================================
 # TAB 1: ÜBERSICHT & DETAIL-ANALYSE
@@ -88,7 +96,6 @@ with tab_overview:
     st.divider()
     st.subheader("2. Detail-Analyse")
 
-    seg_options = {seg_cfg["name"]: seg_id for seg_id, seg_cfg in SEGMENTS.items()}
     selected_name = st.selectbox("Sub-Segment auswählen:", list(seg_options.keys()), key="ov_seg")
     selected_seg_id = seg_options[selected_name]
 
@@ -96,11 +103,9 @@ with tab_overview:
     cutoff = hist_df["date"].max() - pd.DateOffset(years=5)
     hist_5y = hist_df[hist_df["date"] >= cutoff].copy()
 
-    # Chart 1: Gesamt-Score + BUY / ORANGE / SELL Marker
     fig_total = go.Figure()
     fig_total.add_hrect(y0=0, y1=THRESHOLDS["bottom_level"], fillcolor="rgba(239, 68, 68, 0.08)", line_width=0)
     fig_total.add_hrect(y0=THRESHOLDS["orange_min"], y1=100, fillcolor="rgba(249, 115, 22, 0.08)", line_width=0)
-
     fig_total.add_trace(go.Scatter(
         x=hist_5y["date"], y=hist_5y["s_total"],
         mode="lines", name="Gesamt-Score", line=dict(color="#3b82f6", width=2.5),
@@ -121,7 +126,6 @@ with tab_overview:
 
     fig_total.add_hline(y=THRESHOLDS["bottom_level"], line_dash="dash", line_color="#dc2626", annotation_text="Boden (25)")
     fig_total.add_hline(y=THRESHOLDS["orange_min"], line_dash="dash", line_color="#f97316", annotation_text="Überhitzt (70)")
-
     fig_total.update_layout(
         title=f"Gesamt-Score & Signale (5 Jahre) – {selected_name}",
         yaxis=dict(title="Score (0–100)", range=[0, 100]),
@@ -130,7 +134,6 @@ with tab_overview:
     )
     st.plotly_chart(fig_total, use_container_width=True)
 
-    # Chart 2: Sub-Scores
     fig_sub = go.Figure()
     fig_sub.add_trace(go.Scatter(x=hist_5y["date"], y=hist_5y["s_demand"], mode="lines", name="Nachfrage (50%)", line=dict(color="#16a34a", width=2)))
     fig_sub.add_trace(go.Scatter(x=hist_5y["date"], y=hist_5y["s_capacity"], mode="lines", name="Kapazität (30%)", line=dict(color="#f59e0b", width=2)))
@@ -142,7 +145,6 @@ with tab_overview:
     )
     st.plotly_chart(fig_sub, use_container_width=True)
 
-    # Tabelle: Einzelindikatoren
     st.markdown("#### Aktuelle Einzelindikatoren")
     ind_details = db.get_latest_indicator_details(selected_seg_id)
     ind_meta = {ind["id"]: ind for ind in SEGMENTS[selected_seg_id]["indicators"]}
@@ -177,11 +179,11 @@ with tab_backtest:
     with col2:
         seg_cfg = SEGMENTS[bt_seg_id]
         asset_choices = [seg_cfg["benchmark_etf"]] + seg_cfg["stocks"]
-        bt_ticker = st.selectbox("ETF / Aktie:", asset_choices)
+        bt_ticker = st.selectbox("ETF / Aktie:", asset_choices, key="bt_ticker")
     with col3:
-        use_dl = st.checkbox("Double-Lock (10W-EMA)", value=True)
+        use_dl = st.checkbox("Double-Lock (10W-EMA)", value=True, key="bt_dl")
     with col4:
-        ts_pct = st.slider("Trailing-Stop (%)", min_value=0, max_value=35, value=15, step=5) / 100.0
+        ts_pct = st.slider("Trailing-Stop (%)", min_value=0, max_value=35, value=15, step=5, key="bt_ts") / 100.0
 
     bt_hist = db.get_segment_history(bt_seg_id)
     with st.spinner(f"Berechne Backtest für {bt_ticker}..."):
@@ -204,41 +206,22 @@ with tab_backtest:
         k5.metric("Win-Rate / Trades", f"{m['win_rate']:.0f} % ({m['num_trades']})")
 
         bt_df = res["df"]
-
-        # Overlay-Chart: Kurs + Zyklus-Score + BUY/SELL-Dreiecke
         fig_bt = make_subplots(specs=[[{"secondary_y": True}]])
-        fig_bt.add_trace(
-            go.Scatter(x=bt_df["date"], y=bt_df["price"], name=f"{bt_ticker} Kurs", line=dict(color="#10b981", width=2.5)),
-            secondary_y=False,
-        )
-        fig_bt.add_trace(
-            go.Scatter(x=bt_df["date"], y=bt_df["s_total"], name="Zyklus-Score", line=dict(color="rgba(59,130,246,0.45)", width=1.8)),
-            secondary_y=True,
-        )
+        fig_bt.add_trace(go.Scatter(x=bt_df["date"], y=bt_df["price"], name=f"{bt_ticker} Kurs", line=dict(color="#10b981", width=2.5)), secondary_y=False)
+        fig_bt.add_trace(go.Scatter(x=bt_df["date"], y=bt_df["s_total"], name="Zyklus-Score", line=dict(color="rgba(59,130,246,0.45)", width=1.8)), secondary_y=True)
 
         if res["buy_points"]:
             bx, by, _ = zip(*res["buy_points"])
-            fig_bt.add_trace(
-                go.Scatter(x=bx, y=by, mode="markers", name="🟢 BUY", marker=dict(color="#16a34a", size=13, symbol="triangle-up")),
-                secondary_y=False,
-            )
+            fig_bt.add_trace(go.Scatter(x=bx, y=by, mode="markers", name="🟢 BUY", marker=dict(color="#16a34a", size=13, symbol="triangle-up")), secondary_y=False)
         if res["sell_points"]:
             sx, sy, s_txt = zip(*res["sell_points"])
-            fig_bt.add_trace(
-                go.Scatter(x=sx, y=sy, mode="markers", name="🔴 SELL", text=s_txt, marker=dict(color="#dc2626", size=13, symbol="triangle-down")),
-                secondary_y=False,
-            )
+            fig_bt.add_trace(go.Scatter(x=sx, y=sy, mode="markers", name="🔴 SELL", text=s_txt, marker=dict(color="#dc2626", size=13, symbol="triangle-down")), secondary_y=False)
 
-        fig_bt.update_layout(
-            title=f"{bt_ticker} Kurs vs. Zyklus-Score ({bt_seg_name})",
-            hovermode="x unified", height=450,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        )
+        fig_bt.update_layout(title=f"{bt_ticker} Kurs vs. Zyklus-Score ({bt_seg_name})", hovermode="x unified", height=450)
         fig_bt.update_yaxes(title_text=f"{bt_ticker} Kurs", secondary_y=False)
         fig_bt.update_yaxes(title_text="Zyklus-Score (0–100)", range=[0, 100], secondary_y=True)
         st.plotly_chart(fig_bt, use_container_width=True)
 
-        # Equity-Kurve: Strategie vs. Buy & Hold
         fig_eq = go.Figure()
         fig_eq.add_trace(go.Scatter(x=bt_df["date"], y=bt_df["strategy_equity"], name="Strategie (Start = 100)", line=dict(color="#16a34a", width=2.5)))
         fig_eq.add_trace(go.Scatter(x=bt_df["date"], y=bt_df["bh_equity"], name="Buy & Hold (Start = 100)", line=dict(color="#94a3b8", width=2, dash="dot")))
@@ -250,3 +233,110 @@ with tab_backtest:
             st.dataframe(res["trades"], use_container_width=True, hide_index=True)
         else:
             st.info("Keine Trades im gewählten Zeitraum ausgelöst.")
+
+# ==============================================================================
+# TAB 3: SIGNAL-DIAGNOSE (QUANT-LAB)
+# ==============================================================================
+with tab_quant:
+    st.subheader("🔬 Signal-Diagnose (Quant-Lab)")
+    st.caption("Finde heraus, ob dein Zyklus-Score vorausläuft, welche Zonen Rendite bringen und ob ein geglättetes Regime besser performt.")
+
+    q1, q2, q3, q4, q5 = st.columns([2, 1.2, 1, 1, 1.2])
+    with q1:
+        q_seg_name = st.selectbox("Segment:", list(seg_options.keys()), key="q_seg")
+        q_seg_id = seg_options[q_seg_name]
+    with q2:
+        q_cfg = SEGMENTS[q_seg_id]
+        q_ticker = st.selectbox("ETF / Aktie:", [q_cfg["benchmark_etf"]] + q_cfg["stocks"], key="q_ticker")
+    with q3:
+        fast_ema = st.number_input("Regime Fast-EMA", min_value=2, max_value=12, value=4, step=1)
+    with q4:
+        slow_ema = st.number_input("Regime Slow-EMA", min_value=6, max_value=26, value=13, step=1)
+    with q5:
+        horizon = st.selectbox("Forward-Horizont", [13, 26, 52], index=1, format_func=lambda x: f"{x} Wochen")
+
+    q_price_filter = st.checkbox("Preis-Filter aktivieren (Kurs > 10W-EMA)", value=True, key="q_pf")
+
+    q_hist = db.get_segment_history(q_seg_id)
+    with st.spinner(f"Analysiere {q_ticker}..."):
+        comp = analyzer.compare_strategies(
+            q_hist, q_ticker, fast_ema=int(fast_ema), slow_ema=int(slow_ema), use_price_filter=q_price_filter
+        )
+
+    if "error" in comp:
+        st.error(comp["error"])
+    else:
+        price_series = comp["price"]
+
+        # --- 1. Strategie-Vergleich (Regime vs. Punkt-Signal vs. Buy & Hold) ---
+        st.markdown("#### 1. Strategie-Vergleich: Geglättetes Zyklus-Regime vs. Punkt-Signal")
+        st.dataframe(comp["summary"], use_container_width=True, hide_index=True)
+
+        cdf = comp["df"]
+        fig_comp = go.Figure()
+        fig_comp.add_trace(go.Scatter(x=cdf["date"], y=cdf["regime_equity"], name=f"Geglättetes Regime (EMA {fast_ema}/{slow_ema})", line=dict(color="#16a34a", width=3)))
+        fig_comp.add_trace(go.Scatter(x=cdf["date"], y=cdf["strategy_equity"], name="Punkt-Signal (V2.0)", line=dict(color="#f59e0b", width=2)))
+        fig_comp.add_trace(go.Scatter(x=cdf["date"], y=cdf["bh_equity"], name=f"Buy & Hold ({q_ticker})", line=dict(color="#94a3b8", width=2, dash="dot")))
+        fig_comp.update_layout(title=f"Kapitalentwicklung im Vergleich – {q_ticker} (Start = 100)", hovermode="x unified", height=380)
+        st.plotly_chart(fig_comp, use_container_width=True)
+
+        # --- 2. Lead/Lag & Forward-Return-Heatmap nebeneinander ---
+        c_left, c_right = st.columns(2)
+
+        with c_left:
+            st.markdown("#### 2. Lead / Lag-Analyse (Vorlauf vs. Nachlauf)")
+            ll = analyzer.compute_lead_lag(q_hist, price_series, max_lag=26)
+            if "error" in ll:
+                st.warning(ll["error"])
+            else:
+                best_lag = ll["best_lag"]
+                best_corr = ll["best_corr"]
+                if best_lag > 2:
+                    st.success(f"**Frühindikator:** Peak-Korrelation `{best_corr}` bei **+{best_lag} Wochen** (Score läuft Kurs voraus).")
+                elif best_lag < -2:
+                    st.warning(f"**Nachläufer:** Peak-Korrelation `{best_corr}` bei **{best_lag} Wochen** (Kurs läuft Score voraus → besser als Regime-Filter nutzen).")
+                else:
+                    st.info(f"**Gleichläufer:** Peak-Korrelation `{best_corr}` bei **{best_lag:+d} Wochen** (Score & Kurs bewegen sich parallel).")
+
+                ll_df = ll["df"]
+                colors = ["#16a34a" if x > 0 else "#ef4444" for x in ll_df["correlation"]]
+                fig_ll = go.Figure(go.Bar(x=ll_df["lag_weeks"], y=ll_df["correlation"], marker_color=colors))
+                fig_ll.add_vline(x=0, line_dash="dash", line_color="white")
+                fig_ll.update_layout(
+                    xaxis_title="Verschiebung in Wochen (>0 = Score läuft voraus)",
+                    yaxis_title="Korrelation",
+                    height=340,
+                    margin=dict(t=20, b=40, l=40, r=20),
+                )
+                st.plotly_chart(fig_ll, use_container_width=True)
+
+        with c_right:
+            st.markdown(f"#### 3. Forward-Return-Heatmap ({horizon}W-Rendite)")
+            hm = analyzer.compute_forward_return_matrix(q_hist, price_series, horizon_weeks=int(horizon))
+            if "error" in hm:
+                st.warning(hm["error"])
+            else:
+                mean_df = hm["mean"]
+                cnt_df = hm["count"]
+                text_mat = [
+                    [
+                        f"{mean_df.iloc[r, c]:+.1f}%<br>(n={cnt_df.iloc[r, c]})" if pd.notna(mean_df.iloc[r, c]) else "—"
+                        for c in range(len(mean_df.columns))
+                    ]
+                    for r in range(len(mean_df.index))
+                ]
+                fig_hm = go.Figure(data=go.Heatmap(
+                    z=mean_df.values,
+                    x=list(mean_df.columns),
+                    y=list(mean_df.index),
+                    text=text_mat,
+                    texttemplate="%{text}",
+                    colorscale="RdYlGn",
+                    zmid=0,
+                    showscale=True,
+                ))
+                fig_hm.update_layout(
+                    height=380,
+                    margin=dict(t=20, b=40, l=40, r=20),
+                )
+                st.plotly_chart(fig_hm, use_container_width=True)
