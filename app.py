@@ -334,14 +334,30 @@ with tab_port:
     st.subheader("🏆 Portfolio-Backtest vs. S&P 500 (SPY)")
     st.caption("Vergleicht deine 3 Portfolio-Szenarien (über alle 7 aktiven Sektoren) direkt gegen Buy & Hold S&P 500.")
 
-    max_w = st.slider(
-        "Max. Gewicht pro Sektor (%) — Rest wird in SHY/SPY geparkt (100% = kein Cap):",
-        min_value=20, max_value=100, value=33, step=5
-    ) / 100.0
+    p_col1, p_col2 = st.columns([2, 1.5])
+    with p_col1:
+        max_w = st.slider(
+            "Max. Gewicht pro Sektor (%) — Rest in SHY/SPY:",
+            min_value=20, max_value=100, value=35, step=5
+        ) / 100.0
+    with p_col2:
+        use_backstop = st.checkbox(
+            "🛡️ Crash-Backstop aktivieren (VIX > 25 & SPY < 200-Tage-Linie → 100% SHY)",
+            value=True,
+        )
 
     if st.button("🚀 Portfolio-Backtest vs. SPY starten", type="primary"):
         with st.spinner("Simuliere alle 3 Szenarien gegen S&P 500..."):
-            p_res = portfolio_backtester.run_portfolio_backtest(max_sector_weight=max_w)
+            p_res = portfolio_backtester.run_portfolio_backtest(
+                max_sector_weight=max_w,
+                use_crash_backstop=use_backstop,
+            )
+
+        if "error" in p_res:
+            st.error(p_res["error"])
+        else:
+            if use_backstop:
+                st.info(f"🛡️ **Crash-Backstop aktiv:** In **{p_res['backstop_pct']} %** aller Wochen war das Portfolio komplett in Treasuries (SHY) geschützt.")
 
         if "error" in p_res:
             st.error(p_res["error"])
