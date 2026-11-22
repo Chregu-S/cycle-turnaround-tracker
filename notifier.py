@@ -1,5 +1,9 @@
 """
-notifier.py (Version 2.1 – Ignoriert gelöschte Alt-Segmente in der DB)
+notifier.py (Version 3.0 – Inkl. fertiger Sonntags-Allokation Top-3 Active + Smart Park)
+- BUY-Alert inkl. automatischem Stock-Picker (Top-3-Aktien nach 13W-Momentum)
+- ORANGE (Frühwarnung) & SELL (Hard Exit) Alerts
+- Sonntags-Digest inkl. konkreter Ziel-Allokation für Montagmorgen (max. 35%/Sektor, Rest SPY/SHY)
+- Sicherer HTML-Escape für Daten-Warnungen
 """
 
 import html
@@ -7,8 +11,9 @@ import os
 import pandas as pd
 import requests
 import yfinance as yf
-from config import SEGMENTS
+from config import SEGMENTS, THRESHOLDS
 import database as db
+import backtester
 
 
 def send_telegram_message(text: str) -> bool:
@@ -48,6 +53,82 @@ def _rank_segment_stocks(stocks: list[str]) -> list[tuple[str, float, float]]:
         except Exception:
             continue
     return sorted(ranked, key=lambda x: x[1], reverse=True)
+
+
+def _compute_target_allocation(max_sector_weight: float = 0.35, top_n: int = 3, vix_thresh: float = 25.0) -> dict:
+    """
+    Berechnet die Ziel-Allokation (in %) für die kommende Woche:
+    - Nur aktive Sektoren (EMA 6 > EMA 20), max. 35 % pro Sektor, maximal Top-3 nach Momentum
+    - Restliches Kapital in SPY (oder SHY, falls VIX > 25 und SPY < 40W-SMA)
+    """
+    fast_span = THRESHOLDS.get("regime_fast_ema", 6)
+    slow_span = THRESHOLDS.get("regime_slow_ema", 20)
+
+    active_candidates = []
+    for seg_id, seg_cfg in SEGMENTS.items():
+        if seg_id not in SEGMENTS:
+            continue
+        hist = db.get_segment_history(seg_id)
+        if hist.empty or len(hist) < slow_span:
+            continue
+        hist = hist.sort_values("date")
+        s_tot = hist["s_total"]
+        ema_f = float(s_tot.ewm(span=fast_span, adjust=False).mean().iloc[-1])
+        ema_s = float(s_tot.ewm(span=slow_span, adjust=False).mean().iloc[-1])
+        curr_sig = str(hist["signal"].iloc[-1])
+
+        if ema_f > ema_s:
+            active_candidates.append({
+                "seg_id": seg_id,
+                "etf": seg_cfg["benchmark_etf"],
+                "short_name": seg_cfg["short_name"],
+                "momentum": ema_f - ema_s,
+                "signal": curr_sig,
+            })
+
+    active_candidates.sort(key=lambda x: x["momentum"], reverse=True)
+    selected = active_candidates[:top_n]
+
+    # Parkplatz-Regel prüfen (VIX > 25 & SPY < 40W-SMA -> SHY, sonst SPY)
+    park_ticker = "SPY"
+    park_reason = "SPY > 40W-SMA / VIX normal"
+    try:
+        spy_px = backtester.fetch_weekly_price("SPY", "2025-01-01")
+        vix_px = backtester.fetch_weekly_price("^VIX", "2025-01-01")
+        if not spy_px.empty and len(spy_px) >= 20:
+            spy_last = float(spy_px.iloc[-1])
+            spy_sma40 = float(spy_px.tail(40).mean())
+            vix_last = float(vix_px.iloc[-1]) if not vix_px.empty else 0.0
+            if vix_last > vix_thresh and spy_last < spy_sma40:
+                park_ticker = "SHY"
+                park_reason = f"Crash-Park aktiv (VIX {vix_last:.1f} > {vix_thresh:.0f} & SPY < 40W-SMA)"
+            else:
+                park_reason = f"VIX {vix_last:.1f} | SPY {'<' if spy_last < spy_sma40 else '>='} 40W-SMA"
+    except Exception:
+        pass
+
+    allocations = []
+    used_weight = 0.0
+    if selected:
+        w_each = min(1.0 / len(selected), max_sector_weight)
+        for item in selected:
+            pct = round(w_each * 100.0, 1)
+            used_weight += pct
+            allocations.append({
+                "ticker": item["etf"],
+                "label": f"{item['short_name']} ({item['signal']})",
+                "pct": pct,
+            })
+
+    park_pct = round(max(0.0, 100.0 - used_weight), 1)
+    if park_pct > 0:
+        allocations.append({
+            "ticker": park_ticker,
+            "label": "Parkplatz",
+            "pct": park_pct,
+        })
+
+    return {"allocations": allocations, "park_reason": park_reason}
 
 
 def notify_signal_changes():
@@ -99,6 +180,7 @@ def notify_signal_changes():
 
 
 def notify_weekly_digest():
+    """Sendet jeden Sonntag den Digest inkl. fertiger Ziel-Allokation (Top-3 Active + Smart Park)."""
     latest_map = db.get_latest_two_segment_signals()
     watchlist = []
     movers = []
@@ -124,11 +206,20 @@ def notify_weekly_digest():
     top_up = movers[0]
     top_down = movers[-1]
 
+    alloc_info = _compute_target_allocation(max_sector_weight=0.35, top_n=3, vix_thresh=25.0)
+    alloc_lines = [
+        f"  • <b>{a['pct']:.0f}% {html.escape(a['ticker'])}</b> — {html.escape(a['label'])}"
+        for a in alloc_info["allocations"]
+    ]
+
     lines = [
-        "📊 <b>Sonntags-Digest – Cycle Tracker</b>",
-        f"• 🟡 Watchlist (kurz vor BUY): {', '.join(watchlist) if watchlist else 'keine'}",
-        f"• 🚀 Wochengewinner: <b>{top_up[0]}</b> ({top_up[2]:+.1f} auf {top_up[1]:.1f})",
-        f"• 📉 Wochenverlierer: <b>{top_down[0]}</b> ({top_down[2]:+.1f} auf {top_down[1]:.1f})",
+        "📊 <b>Sonntags-Digest &amp; Ziel-Allokation</b>",
+        f"• 🟡 Watchlist: {', '.join(watchlist) if watchlist else 'keine'}",
+        f"• 🚀 Gewinner: <b>{html.escape(top_up[0])}</b> ({top_up[2]:+.1f} auf {top_up[1]:.1f})",
+        f"• 📉 Verlierer: <b>{html.escape(top_down[0])}</b> ({top_down[2]:+.1f} auf {top_down[1]:.1f})",
+        f"\n💼 <b>Ziel-Portfolio (Top-3 Active, max. 35%)</b>",
+        f"• Park-Check: <i>{html.escape(alloc_info['park_reason'])}</i>",
+        *alloc_lines,
     ]
     send_telegram_message("\n".join(lines))
 
