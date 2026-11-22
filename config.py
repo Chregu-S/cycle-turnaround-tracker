@@ -137,4 +137,12 @@ SEGMENTS = {
         "benchmark_etf": "FLNG",
         "stocks": ["FLNG", "LPG", "GLNG", "BWLP"],
         "indicators": [
-            {"id": "lng_dem_1", "name": "US Natural Gas Futures (NG=F)", "category": "demand", "source": "yf_price", "symbol": "NG=F", "invert": False, "yoy
+            {"id": "lng_dem_1", "name": "US Natural Gas Futures (NG=F)", "category": "demand", "source": "yf_price", "symbol": "NG=F", "invert": False, "yoy": False, "params": {}},
+            {"id": "lng_dem_2", "name": "Brent Crude Oil Price YoY (FRED)", "category": "demand", "source": "fred", "symbol": "DCOILBRENTEU", "invert": False, "yoy": True, "params": {}},
+            {"id": "lng_cap_1", "name": "FLNG & LPG 52W-Drawdown/Flotten-Proxy", "category": "capacity", "source": "yf_drawdown", "symbol": ["FLNG", "LPG"], "invert": False, "yoy": False, "params": {}},
+            {"id": "lng_cap_2", "name": "Relativstärke LNG vs. Markt (FLNG/SPY)", "category": "capacity", "source": "yf_ratio", "symbol": ["FLNG", "SPY"], "invert": False, "yoy": False, "params": {}},
+            {"id": "lng_prc_1", "name": "LNG/LPG 13-Wochen-Kursmomentum", "category": "price", "source": "yf_momentum", "symbol": ["FLNG", "LPG", "GLNG"], "invert": False, "yoy": False, "params": {"window_weeks": 13}},
+            {"id": "lng_prc_2", "name": "Operating Margin / Trend (FLNG, LPG, GLNG)", "category": "price", "source": "yf_margin", "symbol": ["FLNG", "LPG", "GLNG"], "invert": False, "yoy": False, "params": {"margin_type": "operating"}},
+        ],
+    },
+}
