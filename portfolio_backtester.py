@@ -1,9 +1,7 @@
 """
-portfolio_backtester.py (Version 3.3 – Smart Parking & Top-N Active Only)
-Vergleicht 3 saubere Strategien (nie in ROT-Sektoren) direkt gegen SPY:
-1. Smart Parking (Alle Aktiven): Alle BUY/HOLD-Sektoren (mit Cap) + Rest in SPY (oder SHY bei VIX>25 & SPY<200DMA)
-2. Top-N Active + Smart Parking: Max. Top N aktive BUY/HOLD-Sektoren (nach EMA6-EMA20) + Rest im Smart Parking
-3. Reiner 200DMA-Parkplatz: Alle BUY/HOLD-Sektoren + Rest in SPY (oder SHY bei SPY<200DMA)
+portfolio_backtester.py (Version 3.4 – Mit FRED-Lag-Simulation)
+Testet deine 3 Strategien gegen SPY und erlaubt eine künstliche Verzögerung
+der Makro-Signale (z. B. 4 Wochen), um reale FRED-Veröffentlichungs-Lags zu simulieren.
 """
 
 import numpy as np
@@ -35,6 +33,7 @@ def run_portfolio_backtest(
     max_sector_weight: float = 0.35,
     top_n_active: int = 3,
     vix_threshold: float = 25.0,
+    signal_lag_weeks: int = 4,
 ) -> dict:
     fast_span = THRESHOLDS.get("regime_fast_ema", 6)
     slow_span = THRESHOLDS.get("regime_slow_ema", 20)
@@ -79,18 +78,23 @@ def run_portfolio_backtest(
     ret_df = px_df.pct_change()
 
     spy_aligned = spy_px.reindex(common_idx).ffill()
-    spy_sma40 = spy_aligned.rolling(window=40, min_periods=20).mean()  # ~200 Handelstage
+    spy_sma40 = spy_aligned.rolling(window=40, min_periods=20).mean()
     vix_aligned = vix_px.reindex(common_idx).ffill() if not vix_px.empty else pd.Series(0.0, index=common_idx)
 
-    # Parkplatz-Schalter (greift NUR für freies Kapital, nicht für aktive Zykliker)
+    # Parkplatz-Schalter (Marktdaten -> kein FRED-Lag)
     park_shy_vix = (vix_aligned > vix_threshold) & (spy_aligned < spy_sma40)
     park_shy_sma = spy_aligned < spy_sma40
 
     spy_ret = spy_aligned.pct_change().fillna(0.0)
     shy_ret = shy_px.reindex(common_idx).ffill().pct_change().fillna(0.0)
 
+    # Makro-Signale künstlich um 'signal_lag_weeks' nach hinten schieben
     bull_df = pd.DataFrame({k: v.reindex(common_idx).ffill() for k, v in bullish_dict.items() if k in prices_dict})
     mom_df = pd.DataFrame({k: v.reindex(common_idx).ffill() for k, v in momentum_dict.items() if k in prices_dict})
+
+    if signal_lag_weeks > 0:
+        bull_df = bull_df.shift(signal_lag_weeks)
+        mom_df = mom_df.shift(signal_lag_weeks)
 
     valid_counts = ret_df.notna().sum(axis=1)
     valid_dates = common_idx[valid_counts >= 3]
@@ -109,7 +113,6 @@ def run_portfolio_backtest(
         r_spy = float(spy_ret.at[dt_curr])
         r_shy = float(shy_ret.at[dt_curr])
 
-        # Parkplatz-Rendite für diese Woche (ohne Lookahead-Bias)
         use_shy_vix = bool(park_shy_vix.at[dt_prev]) if pd.notna(park_shy_vix.at[dt_prev]) else False
         use_shy_sma = bool(park_shy_sma.at[dt_prev]) if pd.notna(park_shy_sma.at[dt_prev]) else False
 
@@ -122,7 +125,6 @@ def run_portfolio_backtest(
         ]
         active = [s for s in avail if bool(bull_df.at[dt_prev, s])]
 
-        # --- Strategie 1 & 3: Alle aktiven BUY/HOLD-Sektoren ---
         if active:
             w_each = min(1.0 / len(active), max_sector_weight)
             w_idle = max(0.0, 1.0 - w_each * len(active))
@@ -133,7 +135,6 @@ def run_portfolio_backtest(
             ret_1 = r_park_smart
             ret_3 = r_park_200dma
 
-        # --- Strategie 2: Maximal Top-N der aktiven BUY/HOLD-Sektoren ---
         if active:
             active_moms = {
                 s: float(mom_df.at[dt_prev, s])
@@ -160,9 +161,9 @@ def run_portfolio_backtest(
     }, index=sim_dates)
 
     summary = pd.DataFrame([
-        _calc_metrics(eq_df["1: Alle Aktiven + Smart Park (VIX+200DMA)"], "1: Alle Aktiven + Smart Park (VIX>25 & 200DMA)"),
-        _calc_metrics(eq_df[f"2: Top-{top_n_active} Aktive + Smart Park"], f"2: Top-{top_n_active} Aktive + Smart Park"),
-        _calc_metrics(eq_df["3: Alle Aktiven + 200DMA Park"], "3: Alle Aktiven + Reiner 200DMA Park"),
+        _calc_metrics(eq_df["1: Alle Aktiven + Smart Park (VIX+200DMA)"], f"1: Alle Aktiven + Smart Park (Lag {signal_lag_weeks}W)"),
+        _calc_metrics(eq_df[f"2: Top-{top_n_active} Aktive + Smart Park"], f"2: Top-{top_n_active} Aktive + Smart Park (Lag {signal_lag_weeks}W)"),
+        _calc_metrics(eq_df["3: Alle Aktiven + 200DMA Park"], f"3: Alle Aktiven + 200DMA Park (Lag {signal_lag_weeks}W)"),
         _calc_metrics(eq_df["Benchmark: S&P 500 (SPY)"], "Benchmark: S&P 500 (SPY)"),
     ]).sort_values(by="CAGR (%/yr)", ascending=False)
 
