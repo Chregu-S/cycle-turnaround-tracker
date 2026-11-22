@@ -123,7 +123,7 @@ def run_scoring_engine():
 
             # Einzelindikator-Scores für die DB sammeln
             ind_df = pd.DataFrame({
-                "date": raw_df.index.strftime("%Y-%m-%d"),
+                "date": pd.to_datetime(raw_df.index).strftime("%Y-%m-%d"),
                 "indicator_id": ind_id,
                 "segment_id": seg_id,
                 "raw_value": raw_df["raw_value"].values,
@@ -160,7 +160,7 @@ def run_scoring_engine():
         # Ampel-State-Machine anwenden
         seg_df["signal"] = _evaluate_signal(seg_df)
         seg_df["segment_id"] = seg_id
-        seg_df["date"] = seg_df.index.strftime("%Y-%m-%d")
+        seg_df["date"] = pd.to_datetime(seg_df.index).strftime("%Y-%m-%d")
 
         all_segment_rows.append(
             seg_df[["date", "segment_id", "s_demand", "s_capacity", "s_price", "s_total", "signal"]]
