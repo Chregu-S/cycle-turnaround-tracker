@@ -1,9 +1,8 @@
 """
-notifier.py (Version 3.0 – Inkl. fertiger Sonntags-Allokation Top-3 Active + Smart Park)
-- BUY-Alert inkl. automatischem Stock-Picker (Top-3-Aktien nach 13W-Momentum)
+notifier.py (Version 3.1 – Fundamental-Checkliste + Zielwert-Legende im BUY-Alert)
+- BUY-Alert inkl. Top-10-Aktien (13W-Momentum, 52W-Hoch-Abstand, Fwd P/E, P/B, D/E) + Zielwert-Legende
 - ORANGE (Frühwarnung) & SELL (Hard Exit) Alerts
-- Sonntags-Digest inkl. konkreter Ziel-Allokation für Montagmorgen (max. 35%/Sektor, Rest SPY/SHY)
-- Sicherer HTML-Escape für Daten-Warnungen
+- Sonntags-Digest inkl. Ziel-Allokation (Top-3 Active, max. 35%, Smart Park SPY/SHY)
 """
 
 import html
@@ -35,7 +34,11 @@ def send_telegram_message(text: str) -> bool:
         return False
 
 
-def _rank_segment_stocks(stocks: list[str]) -> list[tuple[str, float, float]]:
+def _rank_segment_stocks(stocks: list[str]) -> list[dict]:
+    """
+    Lädt 13W-Momentum, Abstand zum 52W-Hoch sowie Forward P/E, P/B und Debt/Equity
+    für alle hinterlegten Sektor-Aktien via yfinance.
+    """
     ranked = []
     for sym in stocks:
         try:
@@ -46,13 +49,28 @@ def _rank_segment_stocks(stocks: list[str]) -> list[tuple[str, float, float]]:
             close = close.dropna()
             if len(close) < 65:
                 continue
+
             curr = float(close.iloc[-1])
             mom_13w = ((curr / float(close.iloc[-65])) - 1.0) * 100.0
             dd_52w = ((curr / float(close.max())) - 1.0) * 100.0
-            ranked.append((sym, mom_13w, dd_52w))
+
+            info = yf.Ticker(sym).info or {}
+            fwd_pe = info.get("forwardPE")
+            pb = info.get("priceToBook")
+            dte = info.get("debtToEquity")
+
+            ranked.append({
+                "sym": sym,
+                "mom_13w": mom_13w,
+                "dd_52w": dd_52w,
+                "fwd_pe": f"{fwd_pe:.1f}" if isinstance(fwd_pe, (int, float)) and 0 < fwd_pe < 200 else "–",
+                "pb": f"{pb:.1f}" if isinstance(pb, (int, float)) and 0 < pb < 50 else "–",
+                "dte": f"{dte:.0f}%" if isinstance(dte, (int, float)) and dte >= 0 else "–",
+            })
         except Exception:
             continue
-    return sorted(ranked, key=lambda x: x[1], reverse=True)
+
+    return sorted(ranked, key=lambda x: x["mom_13w"], reverse=True)
 
 
 def _compute_target_allocation(max_sector_weight: float = 0.35, top_n: int = 3, vix_thresh: float = 25.0) -> dict:
@@ -66,8 +84,6 @@ def _compute_target_allocation(max_sector_weight: float = 0.35, top_n: int = 3, 
 
     active_candidates = []
     for seg_id, seg_cfg in SEGMENTS.items():
-        if seg_id not in SEGMENTS:
-            continue
         hist = db.get_segment_history(seg_id)
         if hist.empty or len(hist) < slow_span:
             continue
@@ -89,7 +105,6 @@ def _compute_target_allocation(max_sector_weight: float = 0.35, top_n: int = 3, 
     active_candidates.sort(key=lambda x: x["momentum"], reverse=True)
     selected = active_candidates[:top_n]
 
-    # Parkplatz-Regel prüfen (VIX > 25 & SPY < 40W-SMA -> SHY, sonst SPY)
     park_ticker = "SPY"
     park_reason = "SPY > 40W-SMA / VIX normal"
     try:
@@ -152,13 +167,26 @@ def notify_signal_changes():
         seg_name = html.escape(seg_cfg["name"])
 
         if c_sig == "BUY":
-            top_stocks = _rank_segment_stocks(seg_cfg["stocks"])[:3]
-            stock_lines = [f"  • <b>{s}</b>: {m:+.1f}% (13W) | {dd:.1f}% v. 52W-Hoch" for s, m, dd in top_stocks]
+            top_stocks = _rank_segment_stocks(seg_cfg["stocks"])[:10]
+            stock_lines = [
+                f"• <b>{s['sym']}</b> | 13W: {s['mom_13w']:+.0f}% | Hoch: {s['dd_52w']:.0f}% | PE: {s['fwd_pe']} | PB: {s['pb']} | D/E: {s['dte']}"
+                for s in top_stocks
+            ]
+            legend = (
+                "\n🎯 <b>Gute Werte (Orientierung):</b>\n"
+                "• <b>13W:</b> &gt; +5% (Trend dreht, kein fallendes Messer)\n"
+                "• <b>Hoch:</b> -15% bis -40% (noch Turnaround-Luft)\n"
+                "• <b>PE / PB:</b> Fwd PE &lt; 15 | PB &lt; 1.5 (Shipping/Auto oft &lt; 1.0)\n"
+                "• <b>D/E:</b> &lt; 100% (meide &gt; 150% wegen Bilanzrisiko)"
+            )
             msg = (
                 f"🟢 <b>BUY SIGNAL – {seg_name}</b>\n"
                 f"• Score: <b>{curr['s_total']:.1f}</b> (Nachfrage: {curr['s_demand']:.1f})\n"
-                f"• Benchmark-ETF: <b>{seg_cfg['benchmark_etf']}</b>\n"
-                f"• Top-Aktien (Relative Stärke):\n" + ("\n".join(stock_lines) if stock_lines else "  (keine Daten)")
+                f"• Benchmark-ETF: <b>{seg_cfg['benchmark_etf']}</b>\n\n"
+                f"📋 <b>Checkliste (sortiert nach 13W-Momentum):</b>\n"
+                + ("\n".join(stock_lines) if stock_lines else "  (keine Daten)")
+                + "\n"
+                + legend
             )
             send_telegram_message(msg)
 
