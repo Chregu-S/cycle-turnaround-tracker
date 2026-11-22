@@ -1,0 +1,44 @@
+name: Weekly Cycle Turnaround Update
+
+on:
+  schedule:
+    # Läuft jeden Sonntag um 20:00 UTC
+    - cron: "0 20 * * 0"
+  # Ermöglicht dir jederzeit einen manuellen Start per Knopfdruck auf GitHub
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-cycle-data:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Abhängigkeiten installieren
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Wöchentliches Update ausführen
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python run_weekly.py
+
+      - name: Aktualisierte SQLite-Datenbank ins Repo committen
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add cycle_data.db
+          git diff --staged --quiet || git commit -m "chore: weekly cycle data update"
+          git push
