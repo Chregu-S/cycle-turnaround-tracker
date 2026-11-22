@@ -10,7 +10,7 @@ Benchmark-ETFs, Pure-Play-Aktien sowie Entry-/Exit-Regeln.
 DB_PATH = "cycle_data.db"
 PORTFOLIO_PATH = "portfolio.json"
 
-BACKFILL_YEARS = 6
+BACKFILL_YEARS = 15
 ROLLING_WINDOW_WEEKS = 260  # 5 Jahre à 52 Wochen
 
 CATEGORY_WEIGHTS = {
@@ -39,6 +39,10 @@ THRESHOLDS = {
     # Technische Filter (Double-Lock & Trailing-Stop)
     "double_lock_ema_wks": 10,  # Sektor-ETF muss über 10-Wochen-EMA liegen
     "default_trailing_stop": 0.15,  # 15 % Trailing-Stop ab Einstiegs-/Zyklushoch
+
+    # Regime-Logik (NEU in V2.2)
+    "regime_fast_ema": 6,       # Schneller EMA des Gesamt-Scores (6 Wochen)
+    "regime_slow_ema": 20,      # Langsamer EMA des Gesamt-Scores (20 Wochen)
 }
 
 # ==============================================================================
@@ -76,7 +80,7 @@ SEGMENTS = {
     "shipping_tanker": {
         "name": "Shipping – Tanker (Crude & Product)",
         "short_name": "Tanker Shipping",
-        "benchmark_etf": "BWET",
+        "benchmark_etf": "FRO",
         "stocks": ["FRO", "STNG", "INSW", "DHT"],
         "indicators": [
             {"id": "tank_dem_1", "name": "Oil Refiners ETF Momentum (CRAK)", "category": "demand", "source": "yf_momentum", "symbol": ["CRAK"], "invert": False, "yoy": False, "params": {"window_weeks": 13}},
