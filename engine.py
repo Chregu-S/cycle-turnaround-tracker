@@ -1,11 +1,12 @@
 """
-engine.py (Version 2.0 – Positions-State-Machine mit BUY & SELL)
-Berechnet 5-Jahres-Perzentile, Kategorie-Scores und echte Trading-Zustände:
-- BUY    (🟢): Einmaliger Einstieg nach bestätigtem Boden
-- HOLD   (🔵): Offene Long-Position läuft
-- ORANGE (🟠): Frühwarnung / Teilverkauf (Score > 70 & Nachfrage dreht ab)
-- SELL   (🔴): Hard Exit (Peak > 65 & 2 Wochen fallend, oder Notbremse < 25)
-- GELB   (🟡): Watchlist (früher Boden, noch nicht bestätigt)
+engine.py (Version 2.2 – Regime 6/20 Makro-Engine)
+Berechnet 5-Jahres-Perzentile, Kategorie-Scores und echte Trading-Zustände
+auf Basis des geglätteten Zyklus-Regimes (6W-EMA vs. 20W-EMA):
+- BUY    (🟢): 6W-EMA kreuzt über 20W-EMA (Einstieg)
+- HOLD   (🔵): 6W-EMA bleibt über 20W-EMA (Position läuft)
+- ORANGE (🟠): Frühwarnung (Long + Score > 70 + Nachfrage fällt unter 4W-Schnitt)
+- SELL   (🔴): 6W-EMA kreuzt unter 20W-EMA (Hard Exit)
+- GELB   (🟡): Watchlist (Flat, aber Score < 25 und erste positive Woche)
 - ROT    (⚫): Neutral / Abschwung (Flat)
 """
 
@@ -29,86 +30,56 @@ def _rolling_percentile(series: pd.Series, window: int = ROLLING_WINDOW_WEEKS) -
 
 def _evaluate_signal(df: pd.DataFrame) -> pd.Series:
     """
-    Positions-State-Machine (FLAT <-> LONG):
-    Verhindert doppelte BUY-Signale und erzeugt saubere ORANGE- & SELL-Exits.
+    Regime-State-Machine (EMA 6 / EMA 20):
+    Saubere, rauscharme Trendfolge auf Basis des Makro-Zyklus-Scores.
     """
     signals = []
     s_total = df["s_total"].values
     s_demand = df["s_demand"].values
 
+    fast_span = THRESHOLDS.get("regime_fast_ema", 6)
+    slow_span = THRESHOLDS.get("regime_slow_ema", 20)
+
+    ema_fast = df["s_total"].ewm(span=fast_span, adjust=False).mean().values
+    ema_slow = df["s_total"].ewm(span=slow_span, adjust=False).mean().values
     demand_ma = df["s_demand"].rolling(
         window=THRESHOLDS["demand_ma_wks"], min_periods=1
     ).mean().values
 
-    in_position = False  # Merkt sich, ob wir aktuell LONG sind
+    in_position = False
 
     for i in range(len(df)):
         curr = s_total[i]
-        if np.isnan(curr):
+        if np.isnan(curr) or np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]):
             signals.append("ROT")
             continue
 
         prev1 = s_total[i - 1] if i >= 1 else np.nan
-        prev2 = s_total[i - 2] if i >= 2 else np.nan
-
-        demand_up = (
-            not np.isnan(s_demand[i])
-            and not np.isnan(demand_ma[i])
-            and (s_demand[i] > demand_ma[i])
-        )
+        regime_bullish = ema_fast[i] > ema_slow[i]
         demand_down = (
             not np.isnan(s_demand[i])
             and not np.isnan(demand_ma[i])
             and (s_demand[i] < demand_ma[i])
         )
 
-        # ------------------------------------------------------------------
-        # FALL A: WIR SIND AKTUELL NICHT INVESTIERT (FLAT)
-        # ------------------------------------------------------------------
+        # FALL A: AKTUELL FLAT
         if not in_position:
-            start_idx = max(0, i - THRESHOLDS["bottom_lookback_wks"])
-            recent_window = s_total[start_idx : i + 1]
-            had_bottom = bool(np.nanmin(recent_window) < THRESHOLDS["bottom_level"])
-
-            two_weeks_up = (
-                not np.isnan(prev1)
-                and not np.isnan(prev2)
-                and (curr > prev1 > prev2)
-                and (THRESHOLDS["green_min"] <= curr <= THRESHOLDS["green_max"])
-            )
-
-            if had_bottom and two_weeks_up and demand_up:
+            # Erst nach mindestens 20 Wochen Einlaufzeit kaufen
+            if i >= slow_span and regime_bullish:
                 signals.append("BUY")
                 in_position = True
             elif curr < THRESHOLDS["bottom_level"] and not np.isnan(prev1) and curr > prev1:
                 signals.append("GELB")
-            elif curr > THRESHOLDS["green_max"]:
-                signals.append("BLAU")
             else:
                 signals.append("ROT")
 
-        # ------------------------------------------------------------------
-        # FALL B: WIR SIND AKTUELL INVESTIERT (LONG)
-        # ------------------------------------------------------------------
+        # FALL B: AKTUELL LONG
         else:
-            peak_start = max(0, i - THRESHOLDS["sell_lookback_wks"])
-            peak_window = s_total[peak_start : i + 1]
-            had_peak = bool(np.nanmax(peak_window) > THRESHOLDS["sell_peak_level"])
-
-            two_weeks_down = (
-                not np.isnan(prev1)
-                and not np.isnan(prev2)
-                and (curr < prev1 < prev2)
-            )
-
-            # 1. Hard Exit (Makro-Peak gebrochen ODER harter Rückfall < 25)
-            if (had_peak and two_weeks_down) or (curr < THRESHOLDS["hard_stop_score"] and two_weeks_down):
+            if not regime_bullish:
                 signals.append("SELL")
                 in_position = False
-            # 2. Frühwarnung / Teilverkauf (Überhitzt + Nachfrage dreht ab)
             elif curr > THRESHOLDS["orange_min"] and demand_down:
                 signals.append("ORANGE")
-            # 3. Weiter laufen lassen
             else:
                 signals.append("HOLD")
 
@@ -116,7 +87,7 @@ def _evaluate_signal(df: pd.DataFrame) -> pd.Series:
 
 
 def run_scoring_engine():
-    print("Starte Scoring-Engine (V2.0)...")
+    print("Starte Scoring-Engine (V2.2 – Regime 6/20)...")
     all_indicator_rows = []
     all_segment_rows = []
 
@@ -177,4 +148,4 @@ def run_scoring_engine():
     if all_segment_rows:
         db.save_segment_scores(pd.concat(all_segment_rows, ignore_index=True))
 
-    print("Scoring-Engine V2.0 abgeschlossen.")
+    print("Scoring-Engine V2.2 abgeschlossen.")
