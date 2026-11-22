@@ -1,13 +1,10 @@
 """
-notifier.py (Version 2.0)
-- BUY-Alert inkl. automatischem Stock-Picker (Top-3-Aktien nach 13W-Momentum)
-- ORANGE (Frühwarnung) & SELL (Hard Exit) Alerts
-- Kompakter Sonntags-Digest (Watchlist GELB + Top-Mover)
-- Sicherer HTML-Escape für Daten-Warnungen
+notifier.py (Version 2.1 – Ignoriert gelöschte Alt-Segmente in der DB)
 """
 
 import html
 import os
+import pandas as pd
 import requests
 import yfinance as yf
 from config import SEGMENTS
@@ -34,7 +31,6 @@ def send_telegram_message(text: str) -> bool:
 
 
 def _rank_segment_stocks(stocks: list[str]) -> list[tuple[str, float, float]]:
-    """Rankt die Aktien eines Segments nach 13-Wochen-Momentum (%) & Abstand zum 52W-Hoch."""
     ranked = []
     for sym in stocks:
         try:
@@ -55,10 +51,12 @@ def _rank_segment_stocks(stocks: list[str]) -> list[tuple[str, float, float]]:
 
 
 def notify_signal_changes():
-    """Sendet Alerts bei Statuswechsel auf BUY, ORANGE oder SELL."""
     latest_map = db.get_latest_two_segment_signals()
 
     for seg_id, data in latest_map.items():
+        if seg_id not in SEGMENTS:
+            continue
+
         curr = data.get("current")
         prev = data.get("previous")
         if not curr:
@@ -101,12 +99,14 @@ def notify_signal_changes():
 
 
 def notify_weekly_digest():
-    """Sendet jeden Sonntag eine kompakte 5-Zeilen-Übersicht (Watchlist & Mover)."""
     latest_map = db.get_latest_two_segment_signals()
     watchlist = []
     movers = []
 
     for seg_id, data in latest_map.items():
+        if seg_id not in SEGMENTS:
+            continue
+
         curr = data.get("current")
         prev = data.get("previous")
         if not curr:
