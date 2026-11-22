@@ -332,32 +332,23 @@ with tab_quant:
 # ==============================================================================
 with tab_port:
     st.subheader("🏆 Portfolio-Backtest vs. S&P 500 (SPY)")
-    st.caption("Vergleicht deine 3 Portfolio-Szenarien (über alle 7 aktiven Sektoren) direkt gegen Buy & Hold S&P 500.")
+    st.caption("Nie in ROT-Sektoren · Backstop schützt gezielt das freie Parkplatz-Kapital (SPY → SHY).")
 
-    p_col1, p_col2 = st.columns([2, 1.5])
+    p_col1, p_col2 = st.columns([2, 1])
     with p_col1:
         max_w = st.slider(
-            "Max. Gewicht pro Sektor (%) — Rest in SHY/SPY:",
+            "Max. Gewicht pro Sektor (%) — Rest wird geparkt:",
             min_value=20, max_value=100, value=35, step=5
         ) / 100.0
     with p_col2:
-        use_backstop = st.checkbox(
-            "🛡️ Crash-Backstop aktivieren (VIX > 25 & SPY < 200-Tage-Linie → 100% SHY)",
-            value=True,
-        )
+        top_n = st.selectbox("Max. Sektoren für Strategie 2 (Top-N Aktive):", [2, 3, 4], index=1)
 
     if st.button("🚀 Portfolio-Backtest vs. SPY starten", type="primary"):
-        with st.spinner("Simuliere alle 3 Szenarien gegen S&P 500..."):
+        with st.spinner("Simuliere alle 3 Strategien gegen S&P 500..."):
             p_res = portfolio_backtester.run_portfolio_backtest(
                 max_sector_weight=max_w,
-                use_crash_backstop=use_backstop,
+                top_n_active=int(top_n),
             )
-
-        if "error" in p_res:
-            st.error(p_res["error"])
-        else:
-            if use_backstop:
-                st.info(f"🛡️ **Crash-Backstop aktiv:** In **{p_res['backstop_pct']} %** aller Wochen war das Portfolio komplett in Treasuries (SHY) geschützt.")
 
         if "error" in p_res:
             st.error(p_res["error"])
@@ -366,10 +357,10 @@ with tab_port:
 
             eq = p_res["equity"]
             fig_p = go.Figure()
-            fig_p.add_trace(go.Scatter(x=eq.index, y=eq["Active -> S&P 500 (SPY)"], name="B: Active -> SPY", line=dict(color="#16a34a", width=3)))
-            fig_p.add_trace(go.Scatter(x=eq.index, y=eq["Always Top 2 Sectors"], name="C: Always Top 2", line=dict(color="#f59e0b", width=2.5)))
-            fig_p.add_trace(go.Scatter(x=eq.index, y=eq["Active -> Treasuries (SHY)"], name="A: Active -> SHY", line=dict(color="#3b82f6", width=2)))
-            fig_p.add_trace(go.Scatter(x=eq.index, y=eq["S&P 500 Benchmark (SPY)"], name="Benchmark: SPY", line=dict(color="#94a3b8", width=2, dash="dot")))
+            fig_p.add_trace(go.Scatter(x=eq.index, y=eq["1: Alle Aktiven + Smart Park (VIX+200DMA)"], name="1: Alle Aktiven + Smart Park", line=dict(color="#16a34a", width=3)))
+            fig_p.add_trace(go.Scatter(x=eq.index, y=eq[f"2: Top-{top_n} Aktive + Smart Park"], name=f"2: Top-{top_n} Aktive + Smart Park", line=dict(color="#f59e0b", width=2.5)))
+            fig_p.add_trace(go.Scatter(x=eq.index, y=eq["3: Alle Aktiven + 200DMA Park"], name="3: Alle Aktiven + 200DMA Park", line=dict(color="#3b82f6", width=2)))
+            fig_p.add_trace(go.Scatter(x=eq.index, y=eq["Benchmark: S&P 500 (SPY)"], name="Benchmark: SPY", line=dict(color="#94a3b8", width=2, dash="dot")))
 
             fig_p.update_layout(
                 title="Portfolio-Entwicklung vs. S&P 500 (Start = 100)",
