@@ -55,7 +55,7 @@ SEGMENTS = {
         "name": "Shipping – Dry Bulk (Eisenerz, Kohle, Getreide)",
         "short_name": "Dry Bulk Shipping",
         "benchmark_etf": "BDRY",
-        "stocks": ["SBLK", "GOGL", "GNK", "NMM"],
+        "stocks": ["SBLK", "GOGL", "GNK", "NMM", "DSX", "SB", "SHIP", "PANL", "HSHP", "CMBT"],
         "indicators": [
             {"id": "bulk_dem_1", "name": "China/Eisenerz 6M-Momentum (FXI, BHP)", "category": "demand", "source": "yf_momentum", "symbol": ["FXI", "BHP"], "invert": False, "yoy": False, "params": {"window_weeks": 26}},
             {"id": "bulk_dem_2", "name": "Kupfer/Gold-Ratio (HG=F / GC=F)", "category": "demand", "source": "yf_ratio", "symbol": ["HG=F", "GC=F"], "invert": False, "yoy": False, "params": {}},
@@ -73,7 +73,7 @@ SEGMENTS = {
         "name": "Shipping – Tanker (Crude & Product)",
         "short_name": "Tanker Shipping",
         "benchmark_etf": "FRO",
-        "stocks": ["FRO", "STNG", "INSW", "DHT"],
+        "stocks": ["FRO", "STNG", "INSW", "DHT", "TNK", "TRMD", "ECO", "ASC", "NAT", "OET"],
         "indicators": [
             {"id": "tank_dem_1", "name": "Oil Refiners ETF Momentum (CRAK)", "category": "demand", "source": "yf_momentum", "symbol": ["CRAK"], "invert": False, "yoy": False, "params": {"window_weeks": 13}},
             {"id": "tank_dem_2", "name": "Brent Crude Oil Price YoY (FRED Daily)", "category": "demand", "source": "fred", "symbol": "DCOILBRENTEU", "invert": False, "yoy": True, "params": {}},
@@ -91,7 +91,7 @@ SEGMENTS = {
         "name": "Industrie – Allgemeiner Maschinenbau",
         "short_name": "Maschinenbau",
         "benchmark_etf": "XLI",
-        "stocks": ["PH", "ETN", "ROK", "CAT"],
+        "stocks": ["CAT", "PH", "ETN", "ROK", "CMI", "URI", "PCAR", "DOV", "ITW", "EMR"],
         "indicators": [
             {"id": "mac_dem_1", "name": "Kupfer/Gold-Ratio (HG=F / GC=F)", "category": "demand", "source": "yf_ratio", "symbol": ["HG=F", "GC=F"], "invert": False, "yoy": False, "params": {}},
             {"id": "mac_dem_2", "name": "Industrie vs. Versorger Ratio (XLI/XLU)", "category": "demand", "source": "yf_ratio", "symbol": ["XLI", "XLU"], "invert": False, "yoy": False, "params": {}},
@@ -109,7 +109,7 @@ SEGMENTS = {
         "name": "Automobile – OEMs (Massenmarkt & Volumen)",
         "short_name": "Auto OEMs",
         "benchmark_etf": "CARZ",
-        "stocks": ["GM", "F", "STLA", "TM"],
+        "stocks": ["GM", "F", "STLA", "TM", "HMC", "RACE", "TSLA", "RIVN", "LI", "BYDDY"],
         "indicators": [
             {"id": "aut_dem_1", "name": "Zykl. vs. Defensiver Konsum (XLY/XLP)", "category": "demand", "source": "yf_ratio", "symbol": ["XLY", "XLP"], "invert": False, "yoy": False, "params": {}},
             {"id": "aut_dem_2", "name": "US Erstanträge Arbeitslosenhilfe YoY (FRED Weekly)", "category": "demand", "source": "fred", "symbol": "ICSA", "invert": True, "yoy": True, "params": {}},
@@ -127,7 +127,7 @@ SEGMENTS = {
         "name": "Grundstoffe – Agrar & Düngemittel",
         "short_name": "Agrar & Dünger",
         "benchmark_etf": "MOO",
-        "stocks": ["NTR", "MOS", "CF", "DE"],
+        "stocks": ["NTR", "MOS", "CF", "DE", "AGCO", "CNH", "FMC", "CTVA", "BG", "ADM"],
         "indicators": [
             {"id": "agr_dem_1", "name": "Corn Futures Preis (ZC=F)", "category": "demand", "source": "yf_price", "symbol": "ZC=F", "invert": False, "yoy": False, "params": {}},
             {"id": "agr_dem_2", "name": "Soybean Futures Preis (ZS=F)", "category": "demand", "source": "yf_price", "symbol": "ZS=F", "invert": False, "yoy": False, "params": {}},
@@ -145,7 +145,7 @@ SEGMENTS = {
         "name": "Zykl. Konsum – Einzelhandel, Bekleidung & Luxus",
         "short_name": "Einzelhandel",
         "benchmark_etf": "XRT",
-        "stocks": ["TGT", "ANF", "NKE", "RL"],
+        "stocks": ["TGT", "ANF", "NKE", "RL", "URBN", "AEO", "LULU", "DECK", "GAP", "BBY"],
         "indicators": [
             {"id": "ret_dem_1", "name": "Zykl. vs. Defensiver Konsum (XLY/XLP)", "category": "demand", "source": "yf_ratio", "symbol": ["XLY", "XLP"], "invert": False, "yoy": False, "params": {}},
             {"id": "ret_dem_2", "name": "US Erstanträge Arbeitslosenhilfe YoY (FRED Weekly)", "category": "demand", "source": "fred", "symbol": "ICSA", "invert": True, "yoy": True, "params": {}},
@@ -163,7 +163,7 @@ SEGMENTS = {
         "name": "Shipping – LNG / LPG Gas Carrier",
         "short_name": "LNG / LPG Shipping",
         "benchmark_etf": "FLNG",
-        "stocks": ["FLNG", "LPG", "GLNG", "BWLP"],
+        "stocks": ["FLNG", "LPG", "GLNG", "BWLP", "NVGS", "CLCO", "DLNG", "LNG", "NFE", "VG"],
         "indicators": [
             {"id": "lng_dem_1", "name": "US Natural Gas Futures (NG=F)", "category": "demand", "source": "yf_price", "symbol": "NG=F", "invert": False, "yoy": False, "params": {}},
             {"id": "lng_dem_2", "name": "Brent Crude Oil Price YoY (FRED Daily)", "category": "demand", "source": "fred", "symbol": "DCOILBRENTEU", "invert": False, "yoy": True, "params": {}},
