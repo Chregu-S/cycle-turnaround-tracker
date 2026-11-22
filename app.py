@@ -241,7 +241,14 @@ with tab_backtest:
 with tab_quant:
     st.subheader("🔬 Signal-Diagnose (Quant-Lab)")
     st.caption("Finde heraus, ob dein Zyklus-Score vorausläuft, welche Zonen Rendite bringen und ob ein geglättetes Regime besser performt.")
-
+    if st.button("🚀 1-Klick Auto-Diagnose über alle 10 Sektoren starten", type="primary"):
+        with st.spinner("Teste 5 Strategien auf allen 10 Benchmark-ETFs..."):
+            detail_df, summary_df = optimizer.run_global_diagnosis()
+        st.markdown("#### 🏆 Globales Ranking (Durchschnitt über alle 10 Sektoren)")
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        st.markdown("#### 📋 Diagnose pro Sektor")
+        st.dataframe(detail_df, use_container_width=True, hide_index=True)
+        st.divider()
     q1, q2, q3, q4, q5 = st.columns([2, 1.2, 1, 1, 1.2])
     with q1:
         q_seg_name = st.selectbox("Segment:", list(seg_options.keys()), key="q_seg")
