@@ -33,7 +33,8 @@ def main():
         engine.run_scoring_engine()
 
         # 3. Telegram-Benachrichtigungen prüfen & versenden
-        notifier.notify_new_green_signals()
+        notifier.notify_signal_changes()
+        notifier.notify_weekly_digest()
         if warnings:
             notifier.notify_warnings(warnings)
 
