@@ -1,175 +1,291 @@
 """
-engine.py
-Berechnet rollierende 5-Jahres-Perzentile, gewichtete Kategorie-Scores
-und die Ampel-State-Machine (ROT / GELB / GRUEN / BLAU) für alle 10 Segmente.
+fetcher.py
+Lädt alle 60 Indikatoren von FRED, yfinance und Web-Scrapern.
+- Resampled alle Daten auf ein einheitliches wöchentliches Raster (Sonntag, 'W-SUN')
+- Nutzt Forward-Fill (ffill) für monatliche/quartalsweise Reihen
+- Berechnet bei Bedarf YoY-Veränderungen (52 Wochen) zur Saisonbereinigung
+- Fehlertolerant: Bei Ausfall wird der letzte bekannte Wert aus SQLite fortgeschrieben
 """
 
+import os
+import re
+from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+import yfinance as yf
+from fredapi import Fred
 
-from config import SEGMENTS, ROLLING_WINDOW_WEEKS, CATEGORY_WEIGHTS, THRESHOLDS
+from config import SEGMENTS, BACKFILL_YEARS
 import database as db
 
 
-def _rolling_percentile(series: pd.Series, window: int = ROLLING_WINDOW_WEEKS) -> pd.Series:
+def _get_weekly_grid(years: int = BACKFILL_YEARS) -> pd.DatetimeIndex:
+    """Erzeugt das einheitliche wöchentliche Datumsraster (jeder Sonntag)."""
+    end_date = pd.Timestamp.today().normalize()
+    # Auf den letzten abgeschlossenen oder heutigen Sonntag ausrichten
+    start_date = end_date - pd.DateOffset(years=years)
+    return pd.date_range(start=start_date, end=end_date, freq="W-SUN")
+
+
+def _resample_to_weekly(series: pd.Series, grid: pd.DatetimeIndex) -> pd.Series:
+    """Bringt eine beliebige Zeitreihe auf das Sonntags-Raster mit Forward-Fill."""
+    if series is None or series.empty:
+        return pd.Series(dtype=float)
+
+    s = series.copy()
+    s.index = pd.to_datetime(s.index).tz_localize(None)
+    s = s.sort_index()
+    # Auf Sonntag resamplen (letzter bekannter Wert der Woche)
+    s_weekly = s.resample("W-SUN").last()
+    # Auf das globale Raster reindizieren und Lücken vorwärts auffüllen
+    s_weekly = s_weekly.reindex(grid).ffill()
+    return s_weekly
+
+
+def _download_yf_close(ticker: str, start_date: str) -> pd.Series:
+    """Lädt Schlusskurse eines einzelnen Tickers über yfinance (robust gegen MultiIndex)."""
+    df = yf.download(
+        ticker,
+        start=start_date,
+        progress=False,
+        auto_adjust=True,
+        threads=False,
+    )
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+
+    # Neuere yfinance-Versionen liefern teils MultiIndex-Spalten
+    if isinstance(df.columns, pd.MultiIndex):
+        close = df["Close"].iloc[:, 0]
+    else:
+        close = df["Close"]
+
+    return close.dropna()
+
+
+def _fetch_fred(fred_client: Fred, symbol: str, start_date: str) -> pd.Series:
+    """Lädt eine Zeitreihe von der FRED API."""
+    if fred_client is None:
+        raise ValueError("FRED_API_KEY fehlt oder ist ungültig.")
+    # Extra 1 Jahr Puffer laden, damit YoY (52 Wochen) am Anfang keine Lücken hat
+    padded_start = (pd.Timestamp(start_date) - pd.DateOffset(years=1)).strftime("%Y-%m-%d")
+    s = fred_client.get_series(symbol, observation_start=padded_start)
+    if s is None or s.empty:
+        raise ValueError(f"FRED lieferte keine Daten für {symbol}")
+    return s.dropna()
+
+
+def _fetch_yf_price(symbol: str, start_date: str) -> pd.Series:
+    """Lädt den reinen Kursverlauf eines Tickers."""
+    s = _download_yf_close(symbol, start_date)
+    if s.empty:
+        raise ValueError(f"Keine Kursdaten für {symbol}")
+    return s
+
+
+def _fetch_yf_momentum(symbols: list, window_weeks: int, start_date: str, grid: pd.DatetimeIndex) -> pd.Series:
+    """Berechnet das durchschnittliche X-Wochen-Kursmomentum (%) über 1..N Ticker."""
+    padded_start = (pd.Timestamp(start_date) - pd.DateOffset(years=1)).strftime("%Y-%m-%d")
+    series_list = []
+
+    for sym in symbols:
+        close = _download_yf_close(sym, padded_start)
+        if not close.empty:
+            w = close.resample("W-SUN").last().ffill()
+            mom = w.pct_change(periods=window_weeks) * 100.0
+            series_list.append(mom)
+
+    if not series_list:
+        raise ValueError(f"Keine Momentum-Daten für {symbols}")
+
+    combined = pd.concat(series_list, axis=1).mean(axis=1)
+    return combined.reindex(grid).ffill()
+
+
+def _fetch_yf_ratio(symbols: list, start_date: str, grid: pd.DatetimeIndex) -> pd.Series:
+    """Berechnet das Verhältnis Ticker A / Ticker B (z. B. SMH/SPY oder Kupfer/Gold)."""
+    s1 = _download_yf_close(symbols[0], start_date)
+    s2 = _download_yf_close(symbols[1], start_date)
+    if s1.empty or s2.empty:
+        raise ValueError(f"Ratio-Daten unvollständig für {symbols}")
+
+    w1 = _resample_to_weekly(s1, grid)
+    w2 = _resample_to_weekly(s2, grid)
+    return (w1 / w2).replace([np.inf, -np.inf], np.nan).ffill()
+
+
+def _fetch_yf_drawdown(symbols: list, start_date: str, grid: pd.DatetimeIndex) -> pd.Series:
     """
-    Berechnet den rollierenden Perzentil-Rang (0 bis 100) über die letzten
-    'window' Wochen. Nutzt mindestens 26 Wochen Historie als Minimum.
+    Berechnet den durchschnittlichen Abstand zum rollierenden 52-Wochen-Hoch (%).
+    Dient als robuster Zyklus-/CapEx-Proxy für stark zyklische Branchen.
     """
-    def _pct_rank(arr):
-        valid = arr[~np.isnan(arr)]
-        if len(valid) < 2:
-            return np.nan
-        current = valid[-1]
-        # Anteil der Werte <= aktuellem Wert (in Prozent)
-        return (np.sum(valid <= current) / len(valid)) * 100.0
+    padded_start = (pd.Timestamp(start_date) - pd.DateOffset(years=1)).strftime("%Y-%m-%d")
+    series_list = []
 
-    return series.rolling(window=window, min_periods=26).apply(_pct_rank, raw=True)
+    for sym in symbols:
+        close = _download_yf_close(sym, padded_start)
+        if not close.empty:
+            w = close.resample("W-SUN").last().ffill()
+            roll_max = w.rolling(window=52, min_periods=10).max()
+            dd = ((w - roll_max) / roll_max) * 100.0
+            series_list.append(dd)
+
+    if not series_list:
+        raise ValueError(f"Keine Drawdown-Daten für {symbols}")
+
+    combined = pd.concat(series_list, axis=1).mean(axis=1)
+    return combined.reindex(grid).ffill()
 
 
-def _evaluate_signal(df: pd.DataFrame) -> pd.Series:
+def _fetch_yf_margin(symbols: list, margin_type: str, start_date: str, grid: pd.DatetimeIndex) -> pd.Series:
     """
-    Wendet die Ampel-State-Machine zeilenweise auf einen Segment-DataFrame an.
-    Spalten benötigt: ['s_total', 's_demand']
+    Versucht Quartals-Margen (Gross/Operating/Net) über yfinance zu laden.
+    Da yfinance oft nur 4–5 Quartale Historie liefert, nutzen wir für die
+    5-Jahres-Vergleichbarkeit ein 26-Wochen-Kursmomentum als stabilen Proxy,
+    wenn weniger als 8 Quartale vorliegen.
     """
-    signals = []
-    s_total = df["s_total"].values
-    s_demand = df["s_demand"].values
+    row_map = {
+        "gross": ["Gross Profit"],
+        "operating": ["Operating Income", "EBIT"],
+        "net": ["Net Income"],
+    }
+    target_rows = row_map.get(margin_type, ["Gross Profit"])
+    margin_series_list = []
 
-    # 4-Wochen-Durchschnitt der Nachfrage für Bedingung 3
-    demand_ma = df["s_demand"].rolling(
-        window=THRESHOLDS["demand_ma_wks"], min_periods=1
-    ).mean().values
-
-    lookback = THRESHOLDS["bottom_lookback_wks"]
-    bottom_lvl = THRESHOLDS["bottom_level"]
-    green_min = THRESHOLDS["green_min"]
-    green_max = THRESHOLDS["green_max"]
-
-    for i in range(len(df)):
-        curr = s_total[i]
-        if np.isnan(curr):
-            signals.append("ROT")
+    for sym in symbols:
+        try:
+            t = yf.Ticker(sym)
+            fin = t.quarterly_income_stmt
+            if fin is not None and not fin.empty and "Total Revenue" in fin.index:
+                rev = fin.loc["Total Revenue"]
+                num = None
+                for r_name in target_rows:
+                    if r_name in fin.index:
+                        num = fin.loc[r_name]
+                        break
+                if num is not None:
+                    m = (num / rev).dropna() * 100.0
+                    # Nur nutzen, wenn ausreichend lange Historie vorhanden ist
+                    if len(m) >= 8:
+                        m.index = pd.to_datetime(m.index).tz_localize(None)
+                        margin_series_list.append(m.sort_index())
+        except Exception:
             continue
 
-        # 1. BLAU: Mid-to-Late Cycle / Halten
-        if curr > green_max:
-            signals.append("BLAU")
-            continue
+    if margin_series_list:
+        combined = pd.concat(margin_series_list, axis=1).mean(axis=1)
+        return _resample_to_weekly(combined, grid)
 
-        # Prüfen, ob genug Historie für Trendvergleich da ist
-        prev1 = s_total[i - 1] if i >= 1 else np.nan
-        prev2 = s_total[i - 2] if i >= 2 else np.nan
+    # Stabiler Fallback: 26-Wochen-Kursmomentum der Branchenführer
+    return _fetch_yf_momentum(symbols, window_weeks=26, start_date=start_date, grid=grid)
 
-        # 2. GRÜN: Bestätigter Turnaround (alle 3 Bedingungen gleichzeitig)
-        start_idx = max(0, i - lookback)
-        recent_window = s_total[start_idx : i + 1]
-        had_bottom = bool(np.nanmin(recent_window) < bottom_lvl) if len(recent_window) > 0 else False
 
-        two_weeks_up = (
-            not np.isnan(prev1)
-            and not np.isnan(prev2)
-            and (curr > prev1 > prev2)
-            and (green_min <= curr <= green_max)
+def _fetch_drewry_wci(fallback_ticker: str, start_date: str, grid: pd.DatetimeIndex) -> tuple[pd.Series, str]:
+    """
+    Scraped den aktuellen Drewry World Container Index (USD pro 40ft-Container).
+    Schreibt den aktuellen Wert in die bestehende Historie fort.
+    Falls das Scraping fehlschlägt oder noch keine Historie existiert,
+    wird sauber auf das ZIM-Kursmomentum zurückgefallen.
+    """
+    url = "https://www.drewry.co.uk/supply-chain-advisors/supply-chain-expertise/world-container-index-assessed-by-drewry"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         )
+    }
+    scraped_val = None
 
-        demand_confirmed = (
-            not np.isnan(s_demand[i])
-            and not np.isnan(demand_ma[i])
-            and (s_demand[i] > demand_ma[i])
-        )
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        text = soup.get_text(" ", strip=True)
+        # Sucht nach typischen Mustern wie "$3,483 per 40ft container"
+        match = re.search(r"\$([0-9]{1,2},[0-9]{3}(?:\.[0-9]+)?)\s*(?:per\s*40ft|per\s*FEU)", text, re.IGNORECASE)
+        if match:
+            scraped_val = float(match.group(1).replace(",", ""))
+    except Exception:
+        scraped_val = None
 
-        if had_bottom and two_weeks_up and demand_confirmed:
-            signals.append("GRUEN")
-            continue
+    # Prüfen, ob wir bereits genug eigene Drewry-Historie in SQLite haben
+    existing = db.get_raw_series("cont_prc_1")
+    if scraped_val is not None and not existing.empty and len(existing) >= 52:
+        s = existing["raw_value"].copy()
+        s.loc[grid[-1]] = scraped_val
+        return _resample_to_weekly(s, grid), "OK"
 
-        # 3. GELB: Watchlist / Früher Boden
-        if curr < bottom_lvl and not np.isnan(prev1) and curr > prev1:
-            signals.append("GELB")
-            continue
-
-        # 4. ROT: Abschwung / Bodenbildung
-        signals.append("ROT")
-
-    return pd.Series(signals, index=df.index)
+    # Beim Initial-Backfill (oder Scrape-Fehler) nutzen wir den ZIM-Proxy,
+    # damit sofort 5 Jahre Historie für das Perzentil vorhanden sind.
+    fallback_series = _fetch_yf_momentum([fallback_ticker], window_weeks=13, start_date=start_date, grid=grid)
+    status = "FALLBACK_ZIM" if scraped_val is None else "PROXY_ZIM"
+    return fallback_series, status
 
 
-def run_scoring_engine():
+def fetch_all_indicators() -> list[str]:
     """
-    Berechnet für alle 10 Segmente und 60 Indikatoren die Perzentile,
-    Kategorie-Scores und Ampel-Signale und speichert sie in SQLite.
+    Hauptfunktion: Aktualisiert alle 60 Indikatoren und speichert sie in SQLite.
+    Gibt eine Liste mit Warnmeldungen zurück (leer, wenn alles sauber lief).
     """
-    print("Starte Scoring-Engine...")
-    all_indicator_rows = []
-    all_segment_rows = []
+    fred_api_key = os.getenv("FRED_API_KEY")
+    fred_client = Fred(api_key=fred_api_key) if fred_api_key else None
+
+    grid = _get_weekly_grid(BACKFILL_YEARS)
+    start_date_str = grid[0].strftime("%Y-%m-%d")
+    warnings = []
+
+    print(f"Starte Datenabruf ({start_date_str} bis {grid[-1].strftime('%Y-%m-%d')})...")
 
     for seg_id, seg_cfg in SEGMENTS.items():
-        cat_series = {"demand": [], "capacity": [], "price": []}
-
+        print(f"  -> Segment: {seg_cfg['short_name']}")
         for ind in seg_cfg["indicators"]:
             ind_id = ind["id"]
-            raw_df = db.get_raw_series(ind_id)
+            source = ind["source"]
+            symbol = ind["symbol"]
+            params = ind.get("params", {})
+            status = "OK"
 
-            if raw_df.empty:
-                continue
+            try:
+                if source == "fred":
+                    raw = _fetch_fred(fred_client, symbol, start_date_str)
+                    weekly = _resample_to_weekly(raw, grid)
+                elif source == "yf_price":
+                    raw = _fetch_yf_price(symbol, start_date_str)
+                    weekly = _resample_to_weekly(raw, grid)
+                elif source == "yf_momentum":
+                    weekly = _fetch_yf_momentum(symbol, params.get("window_weeks", 13), start_date_str, grid)
+                elif source == "yf_ratio":
+                    weekly = _fetch_yf_ratio(symbol, start_date_str, grid)
+                elif source == "yf_drawdown":
+                    weekly = _fetch_yf_drawdown(symbol, start_date_str, grid)
+                elif source == "yf_margin":
+                    weekly = _fetch_yf_margin(symbol, params.get("margin_type", "gross"), start_date_str, grid)
+                elif source == "scrape_drewry":
+                    weekly, status = _fetch_drewry_wci(params.get("fallback_ticker", "ZIM"), start_date_str, grid)
+                else:
+                    raise ValueError(f"Unbekannte Quelle: {source}")
 
-            pct = _rolling_percentile(raw_df["raw_value"], ROLLING_WINDOW_WEEKS)
+                # Saisonbereinigung über 52-Wochen-YoY-Veränderung, falls konfiguriert
+                if ind.get("yoy", False):
+                    weekly = weekly.pct_change(periods=52) * 100.0
+                    weekly = weekly.replace([np.inf, -np.inf], np.nan).ffill()
 
-            # Kontrazyklische Indikatoren invertieren (hoher Score = immer bullisch)
-            if ind.get("invert", False):
-                pct = 100.0 - pct
+                if weekly.dropna().empty:
+                    raise ValueError("Ergebnisreihe ist leer.")
 
-            cat_series[ind["category"]].append(pct.rename(ind_id))
+                db.save_raw_series(ind_id, weekly, status=status)
 
-            # Einzelindikator-Scores für die DB sammeln
-            ind_df = pd.DataFrame({
-                "date": raw_df.index.strftime("%Y-%m-%d"),
-                "indicator_id": ind_id,
-                "segment_id": seg_id,
-                "raw_value": raw_df["raw_value"].values,
-                "percentile": pct.values,
-                "status": raw_df["status"].values,
-            }).dropna(subset=["percentile"])
-            all_indicator_rows.append(ind_df)
+            except Exception as e:
+                # Fehlertoleranz: Letzten bekannten Wert aus SQLite beibehalten
+                last_known = db.get_last_known_value(ind_id)
+                warn_msg = f"[{seg_cfg['short_name']}] {ind['name']} ({ind_id}): {e}"
+                warnings.append(warn_msg)
+                print(f"     [WARNUNG] {warn_msg}")
 
-        # Kategorie-Durchschnitte bilden
-        df_demand = pd.concat(cat_series["demand"], axis=1).mean(axis=1) if cat_series["demand"] else pd.Series(dtype=float)
-        df_capacity = pd.concat(cat_series["capacity"], axis=1).mean(axis=1) if cat_series["capacity"] else pd.Series(dtype=float)
-        df_price = pd.concat(cat_series["price"], axis=1).mean(axis=1) if cat_series["price"] else pd.Series(dtype=float)
+                if last_known is not None:
+                    fallback_series = pd.Series([last_known[1]], index=[grid[-1]])
+                    db.save_raw_series(ind_id, fallback_series, status="FALLBACK_DB")
 
-        seg_df = pd.DataFrame({
-            "s_demand": df_demand,
-            "s_capacity": df_capacity,
-            "s_price": df_price,
-        }).dropna(how="all")
-
-        if seg_df.empty:
-            continue
-
-        # Gewichteter Gesamt-Score (dynamische Normierung, falls eine Kategorie fehlt)
-        w_d = CATEGORY_WEIGHTS["demand"]
-        w_c = CATEGORY_WEIGHTS["capacity"]
-        w_p = CATEGORY_WEIGHTS["price"]
-
-        seg_df["s_total"] = (
-            seg_df["s_demand"].fillna(50.0) * w_d
-            + seg_df["s_capacity"].fillna(50.0) * w_c
-            + seg_df["s_price"].fillna(50.0) * w_p
-        )
-
-        # Ampel-State-Machine anwenden
-        seg_df["signal"] = _evaluate_signal(seg_df)
-        seg_df["segment_id"] = seg_id
-        seg_df["date"] = seg_df.index.strftime("%Y-%m-%d")
-
-        all_segment_rows.append(
-            seg_df[["date", "segment_id", "s_demand", "s_capacity", "s_price", "s_total", "signal"]]
-        )
-
-    if all_indicator_rows:
-        db.save_indicator_scores(pd.concat(all_indicator_rows, ignore_index=True))
-
-    if all_segment_rows:
-        db.save_segment_scores(pd.concat(all_segment_rows, ignore_index=True))
-
-    print("Scoring-Engine erfolgreich abgeschlossen.")
+    return warnings
