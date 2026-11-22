@@ -79,9 +79,9 @@ SEGMENTS = {
         "benchmark_etf": "BWET",
         "stocks": ["FRO", "STNG", "INSW", "DHT"],
         "indicators": [
-            {"id": "tank_dem_1", "name": "US Refinery Utilization (FRED)", "category": "demand", "source": "fred", "symbol": "WPULEUS3", "invert": False, "yoy": False, "params": {}},
-            {"id": "tank_dem_2", "name": "US Crude Oil Inputs to Refineries (FRED)", "category": "demand", "source": "fred", "symbol": "WCRRIUS2", "invert": False, "yoy": True, "params": {}},
-            {"id": "tank_cap_1", "name": "US Commercial Crude Oil Stocks (FRED)", "category": "capacity", "source": "fred", "symbol": "WCESTUS1", "invert": True, "yoy": True, "params": {}},
+            {"id": "tank_dem_1", "name": "Oil Refiners ETF Momentum (CRAK)", "category": "demand", "source": "yf_momentum", "symbol": ["CRAK"], "invert": False, "yoy": False, "params": {"window_weeks": 13}},
+            {"id": "tank_dem_2", "name": "Brent Crude Oil Price YoY (FRED)", "category": "demand", "source": "fred", "symbol": "DCOILBRENTEU", "invert": False, "yoy": True, "params": {}},
+            {"id": "tank_cap_1", "name": "Crack Spread Proxy (RB=F / CL=F)", "category": "capacity", "source": "yf_ratio", "symbol": ["RB=F", "CL=F"], "invert": False, "yoy": False, "params": {}},
             {"id": "tank_cap_2", "name": "FRO & STNG Flotten-/CapEx-Proxy", "category": "capacity", "source": "yf_drawdown", "symbol": ["FRO", "STNG"], "invert": False, "yoy": False, "params": {}},
             {"id": "tank_prc_1", "name": "Tanker Freight Proxy (BWET ETF)", "category": "price", "source": "yf_price", "symbol": "BWET", "invert": False, "yoy": False, "params": {}},
             {"id": "tank_prc_2", "name": "Net Margin / Trend (FRO, STNG)", "category": "price", "source": "yf_margin", "symbol": ["FRO", "STNG"], "invert": False, "yoy": False, "params": {"margin_type": "net"}},
