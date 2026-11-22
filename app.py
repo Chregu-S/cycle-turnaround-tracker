@@ -101,8 +101,7 @@ with tab_overview:
     selected_seg_id = seg_options[selected_name]
 
     hist_df = db.get_segment_history(selected_seg_id)
-    cutoff = hist_df["date"].max() - pd.DateOffset(years=5)
-    hist_5y = hist_df[hist_df["date"] >= cutoff].copy()
+    hist_5y = hist_df.copy()
 
     fig_total = go.Figure()
     fig_total.add_hrect(y0=0, y1=THRESHOLDS["bottom_level"], fillcolor="rgba(239, 68, 68, 0.08)", line_width=0)
