@@ -352,9 +352,6 @@ with tab_port:
                 top_n_active=int(top_n),
                 signal_lag_weeks=int(lag_wks),
             )
-                max_sector_weight=max_w,
-                top_n_active=int(top_n),
-            )
 
         if "error" in p_res:
             st.error(p_res["error"])
